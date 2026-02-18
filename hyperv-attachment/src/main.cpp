@@ -13,6 +13,7 @@
 #include "slat/slat.h"
 #include "slat/cr3/cr3.h"
 #include "slat/violation/violation.h"
+#include "cr3_intercept.h"
 
 #ifndef _INTELMACHINE
 #include <intrin.h>
@@ -63,6 +64,10 @@ void process_first_vmexit()
 std::uint64_t do_vmexit_premature_return()
 {
 #ifdef _INTELMACHINE
+    if (cr3_intercept::enabled)
+    {
+        arch::enable_cr3_exiting();
+    }
     return 0;
 #else
     return __readgsqword(0);
@@ -72,6 +77,18 @@ std::uint64_t do_vmexit_premature_return()
 std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t a2, const std::uint64_t a3, const std::uint64_t a4)
 {
     process_first_vmexit();
+
+    // enforce: force clone CR3 at every VM exit when active
+    if (cr3_intercept::enforce_active)
+    {
+        const cr3 current = arch::get_guest_cr3();
+        if ((current.flags & cr3_intercept::cr3_pfn_mask) == (cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask))
+        {
+            arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
+            arch::invalidate_vpid_current();
+            cr3_intercept::cr3_swap_count++;
+        }
+    }
 
     const std::uint64_t exit_reason = arch::get_vmexit_reason();
 
@@ -107,6 +124,65 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
             return do_vmexit_premature_return();
         }
     }
+    else if (arch::is_mov_cr(exit_reason) == 1)
+    {
+#ifdef _INTELMACHINE
+        const vmx_exit_qualification_mov_cr qualification = arch::get_exit_qualification_mov_cr();
+
+        if (qualification.control_register == 3)
+        {
+            cr3_intercept::cr3_exit_count++;
+
+            trap_frame_t* const trap_frame = *reinterpret_cast<trap_frame_t**>(a1);
+            const std::uint64_t gpr_index = qualification.general_purpose_register;
+
+            if (qualification.access_type == VMX_EXIT_QUALIFICATION_ACCESS_MOV_TO_CR)
+            {
+                const std::uint64_t raw_cr3_value = (gpr_index == VMX_EXIT_QUALIFICATION_GENREG_RSP)
+                    ? arch::get_guest_rsp()
+                    : cr3_intercept::read_gpr(trap_frame, gpr_index);
+
+                // bit 63 = PCID no-invalidate flag, consumed by MOV CR3 instruction
+                // must NOT be written to VMCS guest CR3 (reserved bits above MAXPHYADDR)
+                const std::uint64_t new_cr3_value = raw_cr3_value & ~(1ull << 63);
+
+                cr3_intercept::cr3_last_seen = new_cr3_value;
+
+                if (cr3_intercept::enabled && (new_cr3_value & cr3_intercept::cr3_pfn_mask) == (cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask))
+                {
+                    arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
+                    cr3_intercept::cr3_swap_count++;
+                }
+                else
+                {
+                    arch::set_guest_cr3({ .flags = new_cr3_value });
+                }
+
+                arch::invalidate_vpid_current();
+            }
+            else if (qualification.access_type == VMX_EXIT_QUALIFICATION_ACCESS_MOV_FROM_CR)
+            {
+                const cr3 current_cr3 = arch::get_guest_cr3();
+
+                const std::uint64_t value_to_return = (cr3_intercept::enabled && (current_cr3.flags & cr3_intercept::cr3_pfn_mask) == (cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask))
+                    ? cr3_intercept::target_original_cr3
+                    : current_cr3.flags;
+
+                if (gpr_index == VMX_EXIT_QUALIFICATION_GENREG_RSP)
+                {
+                    arch::set_guest_rsp(value_to_return);
+                }
+                else
+                {
+                    cr3_intercept::write_gpr(trap_frame, gpr_index, value_to_return);
+                }
+            }
+
+            arch::advance_guest_rip();
+            return do_vmexit_premature_return();
+        }
+#endif
+    }
     else if (arch::is_slat_violation(exit_reason) == 1 && slat::violation::process() == 1)
     {
         return do_vmexit_premature_return();
@@ -115,6 +191,13 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
     {
         interrupts::process_nmi();
     }
+
+#ifdef _INTELMACHINE
+    if (cr3_intercept::enabled)
+    {
+        arch::enable_cr3_exiting();
+    }
+#endif
 
     return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
 }

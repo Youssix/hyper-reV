@@ -145,5 +145,8 @@
     <MASM Include="src\interrupts\interrupt_entry.asm">
       <Filter>Source Files</Filter>
     </MASM>
+    <MASM Include="src\arch\intel_invvpid.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
   </ItemGroup>
 </Project>

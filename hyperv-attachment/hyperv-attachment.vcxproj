@@ -180,6 +180,8 @@
     <ClCompile Include="src\slat\hook\amd_page_split.cpp" />
     <ClCompile Include="src\slat\hook\hook.cpp" />
     <ClCompile Include="src\slat\hook\hook_entry.cpp" />
+    <ClCompile Include="src\slat\monitor\monitor.cpp" />
+    <ClCompile Include="src\slat\monitor\monitor_entry.cpp" />
     <ClCompile Include="src\slat\slat.cpp" />
     <ClCompile Include="src\slat\cr3\cr3.cpp" />
     <ClCompile Include="src\slat\cr3\deep_copy.cpp" />
@@ -203,6 +205,8 @@
     <ClInclude Include="src\slat\hook\amd_page_split.h" />
     <ClInclude Include="src\slat\hook\hook_entry.h" />
     <ClInclude Include="src\slat\hook\hook.h" />
+    <ClInclude Include="src\slat\monitor\monitor.h" />
+    <ClInclude Include="src\slat\monitor\monitor_entry.h" />
     <ClInclude Include="src\slat\slat.h" />
     <ClInclude Include="src\slat\cr3\cr3.h" />
     <ClInclude Include="src\slat\cr3\deep_copy.h" />
@@ -214,6 +218,7 @@
   <ItemGroup>
     <MASM Include="src\interrupts\interrupt_entry.asm" />
     <MASM Include="src\slat\cr3\intel_invept.asm" />
+    <MASM Include="src\arch\intel_invvpid.asm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

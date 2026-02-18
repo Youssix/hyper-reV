@@ -14,10 +14,24 @@ namespace hypercall
 	std::uint64_t translate_guest_virtual_address(std::uint64_t guest_virtual_address, std::uint64_t guest_cr3);
 
 	std::uint64_t read_guest_cr3();
+	std::uint64_t read_cr3_exit_count();
+	std::uint64_t read_cr3_swap_count();
+	std::uint64_t read_cr3_last_seen();
+	std::uint64_t write_guest_cr3(std::uint64_t new_cr3);
+	std::uint64_t clone_guest_cr3(std::uint64_t target_cr3);
+	std::uint64_t setup_hidden_region(std::uint64_t pml4_index);
+	std::uint64_t map_hidden_page(std::uint64_t page_index);
+	std::uint64_t enable_cr3_intercept(std::uint64_t target_cr3, std::uint64_t cloned_cr3);
+	std::uint64_t disable_cr3_intercept();
+	std::uint64_t enable_cr3_enforce();
+	std::uint64_t disable_cr3_enforce();
 
 	std::uint64_t add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address);
 	std::uint64_t remove_slat_code_hook(std::uint64_t target_guest_physical_address);
 	std::uint64_t hide_guest_physical_page(std::uint64_t target_guest_physical_address);
+
+	std::uint64_t monitor_physical_page(std::uint64_t target_guest_physical_address);
+	std::uint64_t unmonitor_physical_page(std::uint64_t target_guest_physical_address);
 
 	std::uint64_t flush_logs(std::vector<trap_frame_log_t>& logs);
 

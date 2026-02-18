@@ -42,10 +42,38 @@ namespace sys
 	struct kernel_module_t
 	{
 		std::unordered_map<std::string, std::uint64_t> exports;
-		
+
 		std::uint64_t base_address;
 		std::uint32_t size;
 	};
+
+	struct process_info_t
+	{
+		std::string name;
+		std::uint64_t eprocess;
+		std::uint64_t pid;
+		std::uint64_t cr3;
+		std::uint64_t base_address;
+	};
+
+	namespace process
+	{
+		std::vector<process_info_t> enumerate_processes();
+		std::optional<process_info_t> find_process_by_name(const std::string& name);
+	}
+
+	// dynamic EPROCESS/PEB offsets (resolved from PDB at startup)
+	namespace offsets
+	{
+		inline std::uint64_t eprocess_active_process_links = 0;
+		inline std::uint64_t eprocess_unique_process_id = 0;
+		inline std::uint64_t eprocess_directory_table_base = 0;
+		inline std::uint64_t eprocess_image_file_name = 0;
+		inline std::uint64_t eprocess_section_base_address = 0;
+		inline std::uint64_t eprocess_peb = 0;
+		inline std::uint64_t peb_kernel_callback_table = 0;
+		inline std::uint64_t mm_access_fault_rva = 0;
+	}
 
 	inline std::uint64_t current_cr3 = 0;
 }

@@ -13,7 +13,13 @@ enum class hypercall_type_t : std::uint64_t
     hide_guest_physical_page,
     log_current_state,
     flush_logs,
-    get_heap_free_page_count
+    get_heap_free_page_count,
+    monitor_physical_page,      // Monitor read access to a physical page (EPT violation on read)
+    unmonitor_physical_page,    // Remove monitoring from a physical page
+    write_guest_cr3,            // Write a new CR3 value to the guest VMCS
+    clone_guest_cr3,            // Clone a guest CR3 (copy PML4, return new GPA)
+    enable_cr3_intercept,       // Enable CR3 intercept (swap target CR3 with clone on context switch)
+    disable_cr3_intercept       // Disable CR3 intercept and restore original CR3
 };
 
 #pragma warning(push)

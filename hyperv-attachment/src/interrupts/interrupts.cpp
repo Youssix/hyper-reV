@@ -1,6 +1,8 @@
 #include "interrupts.h"
 #include "../memory_manager/heap_manager.h"
 #include "../slat/cr3/cr3.h"
+#include "../arch/arch.h"
+#include "../cr3_intercept.h"
 
 #include "ia32-doc/ia32.hpp"
 #include <intrin.h>
@@ -98,6 +100,15 @@ void interrupts::process_nmi()
     if (is_nmi_ready(current_apic_id) == 1)
     {
         slat::flush_current_logical_processor_cache();
+
+        if (cr3_intercept::enabled)
+        {
+            arch::enable_cr3_exiting();
+        }
+        else
+        {
+            arch::disable_cr3_exiting();
+        }
 
         clear_nmi_ready(current_apic_id);
     }

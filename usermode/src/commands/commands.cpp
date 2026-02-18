@@ -4,6 +4,7 @@
 #include "../hook/hook.h"
 #include "../hypercall/hypercall.h"
 #include "../system/system.h"
+#include "../inject/inject.h"
 
 #include <print>
 #include <array>
@@ -359,6 +360,57 @@ void process_hgpp(CLI::App* hgpp)
 	}
 }
 
+CLI::App* init_mpp(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* mpp = app.add_subcommand("mpp", "monitor read access to a physical page (EPT violation logging)")->ignore_case();
+
+	add_transformed_command_option(mpp, "physical_address", aliases_transformer)->required();
+
+	return mpp;
+}
+
+void process_mpp(CLI::App* mpp)
+{
+	const std::uint64_t physical_address = get_command_option<std::uint64_t>(mpp, "physical_address");
+
+	const std::uint64_t monitor_status = hypercall::monitor_physical_page(physical_address);
+
+	if (monitor_status == 1)
+	{
+		std::println("success in monitoring page 0x{:X}", physical_address & ~0xFFFull);
+		std::println("use 'fl' to flush and view access logs");
+	}
+	else
+	{
+		std::println("failed to monitor page (already monitored or no entries available)");
+	}
+}
+
+CLI::App* init_umpp(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* umpp = app.add_subcommand("umpp", "remove monitoring from a physical page")->ignore_case();
+
+	add_transformed_command_option(umpp, "physical_address", aliases_transformer)->required();
+
+	return umpp;
+}
+
+void process_umpp(CLI::App* umpp)
+{
+	const std::uint64_t physical_address = get_command_option<std::uint64_t>(umpp, "physical_address");
+
+	const std::uint64_t unmonitor_status = hypercall::unmonitor_physical_page(physical_address);
+
+	if (unmonitor_status == 1)
+	{
+		std::println("success in removing monitor from page 0x{:X}", physical_address & ~0xFFFull);
+	}
+	else
+	{
+		std::println("failed to remove monitor (page not monitored)");
+	}
+}
+
 CLI::App* init_fl(CLI::App& app)
 {
 	CLI::App* fl = app.add_subcommand("fl", "flush trap frame logs from hooks")->ignore_case();
@@ -519,6 +571,415 @@ void process_gva(CLI::App* gva)
 	std::println("alias value: 0x{:X}", alias_value);
 }
 
+CLI::App* init_lp(CLI::App& app)
+{
+	CLI::App* lp = app.add_subcommand("lp", "list all running guest processes")->ignore_case();
+
+	return lp;
+}
+
+void process_lp(CLI::App* lp)
+{
+	const std::vector<sys::process_info_t> processes = sys::process::enumerate_processes();
+
+	if (processes.empty())
+	{
+		std::println("failed to enumerate processes");
+		return;
+	}
+
+	std::println("{:<6} {:<20} {:<18} {:<18} {:<18}", "PID", "Name", "EPROCESS", "CR3", "ImageBase");
+	std::println("{}", std::string(90, '-'));
+
+	for (const auto& process : processes)
+	{
+		std::println("{:<6} {:<20} 0x{:<16X} 0x{:<16X} 0x{:<16X}",
+			process.pid,
+			process.name,
+			process.eprocess,
+			process.cr3,
+			process.base_address);
+	}
+
+	std::println("\nTotal processes: {}", processes.size());
+}
+
+CLI::App* init_fp(CLI::App& app)
+{
+	CLI::App* fp = app.add_subcommand("fp", "find a process by name")->ignore_case();
+
+	add_command_option(fp, "process_name")->required();
+
+	return fp;
+}
+
+void process_fp(CLI::App* fp)
+{
+	const std::string process_name = get_command_option<std::string>(fp, "process_name");
+
+	const std::optional<sys::process_info_t> process = sys::process::find_process_by_name(process_name);
+
+	if (process.has_value() == false)
+	{
+		std::println("process '{}' not found", process_name);
+		return;
+	}
+
+	std::println("Process found: {}", process->name);
+	std::println("  PID:        {}", process->pid);
+	std::println("  EPROCESS:   0x{:X}", process->eprocess);
+	std::println("  CR3:        0x{:X}", process->cr3);
+	std::println("  ImageBase:  0x{:X}", process->base_address);
+}
+
+CLI::App* init_wcr3(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* wcr3 = app.add_subcommand("wcr3", "write a new CR3 value to the guest VMCS")->ignore_case();
+
+	add_transformed_command_option(wcr3, "cr3_value", aliases_transformer)->required();
+
+	return wcr3;
+}
+
+void process_wcr3(CLI::App* wcr3)
+{
+	const std::uint64_t cr3_value = get_command_option<std::uint64_t>(wcr3, "cr3_value");
+
+	const std::uint64_t result = hypercall::write_guest_cr3(cr3_value);
+
+	if (result == 1)
+	{
+		std::println("guest CR3 written: 0x{:X}", cr3_value);
+	}
+	else
+	{
+		std::println("failed to write guest CR3");
+	}
+}
+
+CLI::App* init_rcr3(CLI::App& app)
+{
+	CLI::App* rcr3 = app.add_subcommand("rcr3", "read the current guest CR3 value from VMCS")->ignore_case();
+
+	return rcr3;
+}
+
+void process_rcr3(CLI::App* rcr3)
+{
+	const std::uint64_t cr3_value = hypercall::read_guest_cr3();
+
+	std::println("guest CR3: 0x{:X}", cr3_value);
+}
+
+CLI::App* init_ccr3(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* ccr3 = app.add_subcommand("ccr3", "clone a guest CR3 (copy PML4, return new CR3 value)")->ignore_case();
+
+	add_transformed_command_option(ccr3, "target_cr3", aliases_transformer)->required();
+
+	return ccr3;
+}
+
+void process_ccr3(CLI::App* ccr3)
+{
+	const std::uint64_t target_cr3 = get_command_option<std::uint64_t>(ccr3, "target_cr3");
+
+	const std::uint64_t cloned_cr3 = hypercall::clone_guest_cr3(target_cr3);
+
+	if (cloned_cr3 != 0)
+	{
+		std::println("cloned CR3: 0x{:X} (from target 0x{:X})", cloned_cr3, target_cr3);
+	}
+	else
+	{
+		std::println("failed to clone CR3 (heap full or invalid target)");
+	}
+}
+
+CLI::App* init_icr3(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* icr3 = app.add_subcommand("icr3", "enable CR3 intercept (swap target CR3 with clone on context switch)")->ignore_case();
+
+	add_transformed_command_option(icr3, "target_cr3", aliases_transformer)->required();
+	add_transformed_command_option(icr3, "cloned_cr3", aliases_transformer)->required();
+
+	return icr3;
+}
+
+void process_icr3(CLI::App* icr3)
+{
+	const std::uint64_t target_cr3 = get_command_option<std::uint64_t>(icr3, "target_cr3");
+	const std::uint64_t cloned_cr3 = get_command_option<std::uint64_t>(icr3, "cloned_cr3");
+
+	const std::uint64_t result = hypercall::enable_cr3_intercept(target_cr3, cloned_cr3);
+
+	if (result == 1)
+	{
+		std::println("CR3 intercept enabled: target=0x{:X} clone=0x{:X}", target_cr3, cloned_cr3);
+		std::println("all context switches to target CR3 will now use the clone");
+	}
+	else
+	{
+		std::println("failed to enable CR3 intercept");
+	}
+}
+
+CLI::App* init_dcr3(CLI::App& app)
+{
+	CLI::App* dcr3 = app.add_subcommand("dcr3", "disable CR3 intercept and restore original CR3")->ignore_case();
+
+	return dcr3;
+}
+
+void process_dcr3(CLI::App* dcr3)
+{
+	const std::uint64_t result = hypercall::disable_cr3_intercept();
+
+	if (result == 1)
+	{
+		std::println("CR3 intercept disabled, original CR3 restored");
+	}
+	else
+	{
+		std::println("failed to disable CR3 intercept (not active?)");
+	}
+}
+
+CLI::App* init_cr3stat(CLI::App& app)
+{
+	CLI::App* cr3stat = app.add_subcommand("cr3stat", "show CR3 intercept statistics (MOV CR3 exit count)")->ignore_case();
+
+	return cr3stat;
+}
+
+void process_cr3stat(CLI::App* cr3stat)
+{
+	const std::uint64_t exit_count = hypercall::read_cr3_exit_count();
+	const std::uint64_t swap_count = hypercall::read_cr3_swap_count();
+	const std::uint64_t last_seen = hypercall::read_cr3_last_seen();
+
+	std::println("CR3 exit count: {}", exit_count);
+	std::println("CR3 swap count: {}", swap_count);
+	std::println("CR3 last seen:  0x{:X}", last_seen);
+}
+
+// hidden memory state
+static std::uint64_t hidden_base_va = 0;
+static std::uint64_t hidden_clone_cr3 = 0;
+static std::uint64_t hidden_original_cr3 = 0;
+
+CLI::App* init_mkhidden(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* mkhidden = app.add_subcommand("mkhidden", "setup hidden memory region in clone CR3 (allocates PDPT/PD/PT at given PML4 index)")->ignore_case();
+
+	add_command_option(mkhidden, "pml4_index")->required();
+
+	return mkhidden;
+}
+
+void process_mkhidden(CLI::App* mkhidden)
+{
+	const std::uint64_t pml4_index = get_command_option<std::uint64_t>(mkhidden, "pml4_index");
+
+	const std::uint64_t base_va = hypercall::setup_hidden_region(pml4_index);
+
+	if (base_va != 0)
+	{
+		hidden_base_va = base_va;
+		std::println("hidden region at VA 0x{:X} (PML4[{}], PDPT/PD/PT allocated)", base_va, pml4_index);
+	}
+	else
+	{
+		std::println("failed to setup hidden region (clone CR3 not active or heap full)");
+	}
+}
+
+CLI::App* init_maphidden(CLI::App& app)
+{
+	CLI::App* maphidden = app.add_subcommand("maphidden", "map a data page into the hidden region at given PT index (0-511)")->ignore_case();
+
+	add_command_option(maphidden, "page_index")->required();
+
+	return maphidden;
+}
+
+void process_maphidden(CLI::App* maphidden)
+{
+	const std::uint64_t page_index = get_command_option<std::uint64_t>(maphidden, "page_index");
+
+	const std::uint64_t data_pa = hypercall::map_hidden_page(page_index);
+
+	if (data_pa != 0)
+	{
+		const std::uint64_t page_va = hidden_base_va + (page_index * 0x1000);
+		std::println("page {} mapped at VA 0x{:X}, PA=0x{:X}", page_index, page_va, data_pa);
+	}
+	else
+	{
+		std::println("failed to map hidden page (region not setup or heap full)");
+	}
+}
+
+CLI::App* init_testhidden(CLI::App& app)
+{
+	CLI::App* testhidden = app.add_subcommand("testhidden", "test hidden memory: write via clone CR3, verify invisible via original CR3")->ignore_case();
+
+	return testhidden;
+}
+
+void process_testhidden(CLI::App* testhidden)
+{
+	if (hidden_base_va == 0)
+	{
+		std::println("no hidden region setup (use mkhidden first)");
+		return;
+	}
+
+	// read current CR3s from intercept state
+	const std::uint64_t clone_cr3 = hypercall::read_guest_cr3();
+
+	if (hidden_original_cr3 == 0 || hidden_clone_cr3 == 0)
+	{
+		std::println("set clone/original CR3 first:");
+		std::println("  use 'sethidden <original_cr3> <clone_cr3>' or run ccr3/icr3 sequence");
+		std::println("  current guest CR3 (should be clone): 0x{:X}", clone_cr3);
+		return;
+	}
+
+	const std::uint64_t test_va = hidden_base_va;
+	std::uint64_t write_value = 0xDEADBEEFCAFEBABE;
+	std::uint64_t read_value = 0;
+
+	// write via clone CR3
+	std::println("writing 0x{:X} to clone:0x{:X}...", write_value, test_va);
+	const std::uint64_t bytes_written = hypercall::write_guest_virtual_memory(&write_value, test_va, hidden_clone_cr3, 8);
+
+	if (bytes_written != 8)
+	{
+		std::println("FAILED to write via clone CR3 (wrote {} bytes)", bytes_written);
+		return;
+	}
+
+	std::println("write OK");
+
+	// read back via clone CR3
+	const std::uint64_t bytes_read_clone = hypercall::read_guest_virtual_memory(&read_value, test_va, hidden_clone_cr3, 8);
+
+	if (bytes_read_clone == 8 && read_value == write_value)
+	{
+		std::println("read from clone:0x{:X} = 0x{:X} OK", test_va, read_value);
+	}
+	else
+	{
+		std::println("FAILED read from clone (read {} bytes, value=0x{:X})", bytes_read_clone, read_value);
+		return;
+	}
+
+	// read via original CR3 — should fail (not mapped)
+	read_value = 0;
+	const std::uint64_t bytes_read_orig = hypercall::read_guest_virtual_memory(&read_value, test_va, hidden_original_cr3, 8);
+
+	if (bytes_read_orig == 0)
+	{
+		std::println("read from original:0x{:X} = FAILED (not mapped) OK", test_va);
+		std::println("hidden memory works!");
+	}
+	else
+	{
+		std::println("WARNING: read from original:0x{:X} returned {} bytes, value=0x{:X}", test_va, bytes_read_orig, read_value);
+		std::println("hidden memory may not be properly isolated");
+	}
+}
+
+CLI::App* init_sethidden(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* sethidden = app.add_subcommand("sethidden", "store original and clone CR3 values for testhidden command")->ignore_case();
+
+	add_transformed_command_option(sethidden, "original_cr3", aliases_transformer)->required();
+	add_transformed_command_option(sethidden, "clone_cr3", aliases_transformer)->required();
+
+	return sethidden;
+}
+
+void process_sethidden(CLI::App* sethidden)
+{
+	hidden_original_cr3 = get_command_option<std::uint64_t>(sethidden, "original_cr3");
+	hidden_clone_cr3 = get_command_option<std::uint64_t>(sethidden, "clone_cr3");
+
+	std::println("hidden test CR3s set: original=0x{:X} clone=0x{:X}", hidden_original_cr3, hidden_clone_cr3);
+}
+
+CLI::App* init_hookmmaf(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	CLI::App* hookmmaf = app.add_subcommand("hookmmaf", "install MmAccessFault EPT hook (catches page faults on hidden memory, swaps CR3 to clone)")->ignore_case();
+
+	add_transformed_command_option(hookmmaf, "clone_cr3", aliases_transformer)->required();
+
+	return hookmmaf;
+}
+
+void process_hookmmaf(CLI::App* hookmmaf)
+{
+	const std::uint64_t clone_cr3 = get_command_option<std::uint64_t>(hookmmaf, "clone_cr3");
+
+	if (inject::install_mmaf_hook(clone_cr3))
+	{
+		std::println("MmAccessFault hook installed (clone_cr3=0x{:X})", clone_cr3);
+	}
+	else
+	{
+		std::println("failed to install MmAccessFault hook");
+	}
+}
+
+CLI::App* init_unhookmmaf(CLI::App& app)
+{
+	CLI::App* unhookmmaf = app.add_subcommand("unhookmmaf", "remove MmAccessFault EPT hook")->ignore_case();
+
+	return unhookmmaf;
+}
+
+void process_unhookmmaf(CLI::App* unhookmmaf)
+{
+	if (inject::remove_mmaf_hook())
+	{
+		std::println("MmAccessFault hook removed");
+	}
+	else
+	{
+		std::println("failed to remove MmAccessFault hook");
+	}
+}
+
+CLI::App* init_injectdll(CLI::App& app)
+{
+	CLI::App* injectdll = app.add_subcommand("injectdll", "inject a DLL into a process using hidden memory (PE manual map + KCT hijack)")->ignore_case();
+
+	add_command_option(injectdll, "dll_path")->required();
+	add_command_option(injectdll, "process_name")->required();
+
+	return injectdll;
+}
+
+void process_injectdll(CLI::App* injectdll)
+{
+	const std::string dll_path = get_command_option<std::string>(injectdll, "dll_path");
+	const std::string process_name = get_command_option<std::string>(injectdll, "process_name");
+
+	std::println("[*] Injecting {} into {}...", dll_path, process_name);
+
+	bool result = inject::inject_dll(dll_path, process_name);
+
+	if (result)
+	{
+		std::println("[+] Injection successful!");
+	}
+	else
+	{
+		std::println("[-] Injection failed");
+	}
+}
+
 std::unordered_map<std::string, std::uint64_t> form_aliases()
 {
 	std::unordered_map<std::string, std::uint64_t> aliases = { { "current_cr3", sys::current_cr3 } };
@@ -561,11 +1022,28 @@ void commands::process(const std::string command)
 	CLI::App* rkh = init_rkh(app, aliases_transformer);
 	CLI::App* gva = init_gva(app, aliases_transformer);
 	CLI::App* hgpp = init_hgpp(app, aliases_transformer);
+	CLI::App* mpp = init_mpp(app, aliases_transformer);
+	CLI::App* umpp = init_umpp(app, aliases_transformer);
 	CLI::App* fl = init_fl(app);
 	CLI::App* hfpc = init_hfpc(app);
 	CLI::App* lkm = init_lkm(app);
 	CLI::App* kme = init_kme(app);
 	CLI::App* dkm = init_dkm(app);
+	CLI::App* lp = init_lp(app);
+	CLI::App* fp = init_fp(app);
+	CLI::App* wcr3 = init_wcr3(app, aliases_transformer);
+	CLI::App* rcr3 = init_rcr3(app);
+	CLI::App* ccr3 = init_ccr3(app, aliases_transformer);
+	CLI::App* icr3 = init_icr3(app, aliases_transformer);
+	CLI::App* dcr3 = init_dcr3(app);
+	CLI::App* cr3stat = init_cr3stat(app);
+	CLI::App* mkhidden = init_mkhidden(app, aliases_transformer);
+	CLI::App* maphidden = init_maphidden(app);
+	CLI::App* testhidden = init_testhidden(app);
+	CLI::App* sethidden = init_sethidden(app, aliases_transformer);
+	CLI::App* hookmmaf = init_hookmmaf(app, aliases_transformer);
+	CLI::App* unhookmmaf = init_unhookmmaf(app);
+	CLI::App* injectdll = init_injectdll(app);
 
 	try
 	{
@@ -582,11 +1060,28 @@ void commands::process(const std::string command)
 		d_process_command(rkh);
 		d_process_command(gva);
 		d_process_command(hgpp);
+		d_process_command(mpp);
+		d_process_command(umpp);
 		d_process_command(fl);
 		d_process_command(hfpc);
 		d_process_command(lkm);
 		d_process_command(kme);
 		d_process_command(dkm);
+		d_process_command(lp);
+		d_process_command(fp);
+		d_process_command(wcr3);
+		d_process_command(rcr3);
+		d_process_command(ccr3);
+		d_process_command(icr3);
+		d_process_command(dcr3);
+		d_process_command(cr3stat);
+		d_process_command(mkhidden);
+		d_process_command(maphidden);
+		d_process_command(testhidden);
+		d_process_command(sethidden);
+		d_process_command(hookmmaf);
+		d_process_command(unhookmmaf);
+		d_process_command(injectdll);
 	}
 	catch (const CLI::ParseError& error)
 	{

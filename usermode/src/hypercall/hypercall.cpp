@@ -81,6 +81,75 @@ std::uint64_t hypercall::read_guest_cr3()
 	return make_hypercall(call_type, 0, 0, 0, 0);
 }
 
+std::uint64_t hypercall::read_cr3_exit_count()
+{
+	hypercall_type_t call_type = hypercall_type_t::read_guest_cr3;
+
+	return make_hypercall(call_type, 1, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_cr3_swap_count()
+{
+	hypercall_type_t call_type = hypercall_type_t::read_guest_cr3;
+
+	return make_hypercall(call_type, 2, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_cr3_last_seen()
+{
+	hypercall_type_t call_type = hypercall_type_t::read_guest_cr3;
+
+	return make_hypercall(call_type, 3, 0, 0, 0);
+}
+
+std::uint64_t hypercall::write_guest_cr3(std::uint64_t new_cr3)
+{
+	hypercall_type_t call_type = hypercall_type_t::write_guest_cr3;
+
+	return make_hypercall(call_type, 0, new_cr3, 0, 0);
+}
+
+std::uint64_t hypercall::clone_guest_cr3(std::uint64_t target_cr3)
+{
+	hypercall_type_t call_type = hypercall_type_t::clone_guest_cr3;
+
+	return make_hypercall(call_type, 0, target_cr3, 0, 0);
+}
+
+std::uint64_t hypercall::setup_hidden_region(std::uint64_t pml4_index)
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 1, pml4_index, 0, 0);
+}
+
+std::uint64_t hypercall::map_hidden_page(std::uint64_t page_index)
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 2, page_index, 0, 0);
+}
+
+std::uint64_t hypercall::enable_cr3_intercept(std::uint64_t target_cr3, std::uint64_t cloned_cr3)
+{
+	hypercall_type_t call_type = hypercall_type_t::enable_cr3_intercept;
+
+	return make_hypercall(call_type, 0, target_cr3, cloned_cr3, 0);
+}
+
+std::uint64_t hypercall::disable_cr3_intercept()
+{
+	hypercall_type_t call_type = hypercall_type_t::disable_cr3_intercept;
+
+	return make_hypercall(call_type, 0, 0, 0, 0);
+}
+
+std::uint64_t hypercall::enable_cr3_enforce()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 4, 0, 0, 0);
+}
+
+std::uint64_t hypercall::disable_cr3_enforce()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 5, 0, 0, 0);
+}
+
 std::uint64_t hypercall::add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address)
 {
 	hypercall_type_t call_type = hypercall_type_t::add_slat_code_hook;
@@ -98,6 +167,20 @@ std::uint64_t hypercall::remove_slat_code_hook(std::uint64_t target_guest_physic
 std::uint64_t hypercall::hide_guest_physical_page(std::uint64_t target_guest_physical_address)
 {
 	hypercall_type_t call_type = hypercall_type_t::hide_guest_physical_page;
+
+	return make_hypercall(call_type, 0, target_guest_physical_address, 0, 0);
+}
+
+std::uint64_t hypercall::monitor_physical_page(std::uint64_t target_guest_physical_address)
+{
+	hypercall_type_t call_type = hypercall_type_t::monitor_physical_page;
+
+	return make_hypercall(call_type, 0, target_guest_physical_address, 0, 0);
+}
+
+std::uint64_t hypercall::unmonitor_physical_page(std::uint64_t target_guest_physical_address)
+{
+	hypercall_type_t call_type = hypercall_type_t::unmonitor_physical_page;
 
 	return make_hypercall(call_type, 0, target_guest_physical_address, 0, 0);
 }

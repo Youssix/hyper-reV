@@ -30,6 +30,11 @@ vmx_exit_qualification_ept_violation arch::get_exit_qualification()
 	return { .flags = vmread(VMCS_EXIT_QUALIFICATION) };
 }
 
+vmx_exit_qualification_mov_cr arch::get_exit_qualification_mov_cr()
+{
+	return { .flags = vmread(VMCS_EXIT_QUALIFICATION) };
+}
+
 std::uint64_t arch::get_guest_physical_address()
 {
 	return vmread(VMCS_GUEST_PHYSICAL_ADDRESS);
@@ -98,6 +103,50 @@ std::uint8_t arch::is_slat_violation(const std::uint64_t vmexit_reason)
 #endif
 }
 
+std::uint8_t arch::is_mov_cr(const std::uint64_t vmexit_reason)
+{
+#ifdef _INTELMACHINE
+	return vmexit_reason == VMX_EXIT_REASON_MOV_CR;
+#else
+	(void)vmexit_reason;
+	return 0;
+#endif
+}
+
+void arch::enable_cr3_exiting()
+{
+#ifdef _INTELMACHINE
+	std::uint64_t proc_controls = vmread(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS);
+	proc_controls |= (1ull << 15) | (1ull << 16); // CR3-load exiting | CR3-store exiting
+	vmwrite(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, proc_controls);
+
+	// clear CR3 target list so ALL MOV-to-CR3 cause VM exits
+	// (Hyper-V may have populated targets that would suppress exits)
+	vmwrite(VMCS_CTRL_CR3_TARGET_COUNT, 0);
+#endif
+}
+
+void arch::disable_cr3_exiting()
+{
+#ifdef _INTELMACHINE
+	std::uint64_t proc_controls = vmread(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS);
+	proc_controls &= ~((1ull << 15) | (1ull << 16));
+	vmwrite(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, proc_controls);
+#endif
+}
+
+extern "C" void invalidate_vpid_mappings(invvpid_type type, const invvpid_descriptor& descriptor);
+
+void arch::invalidate_vpid_current()
+{
+	const std::uint16_t vpid = static_cast<std::uint16_t>(vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER));
+
+	invvpid_descriptor descriptor = { };
+	descriptor.vpid = vpid;
+
+	invalidate_vpid_mappings(invvpid_single_context_retaining_globals, descriptor);
+}
+
 std::uint8_t arch::is_non_maskable_interrupt_exit(const std::uint64_t vmexit_reason)
 {
 #ifdef _INTELMACHINE
@@ -129,6 +178,17 @@ cr3 arch::get_guest_cr3()
 #endif
 
 	return guest_cr3;
+}
+
+void arch::set_guest_cr3(const cr3 guest_cr3)
+{
+#ifdef _INTELMACHINE
+	vmwrite(VMCS_GUEST_CR3, guest_cr3.flags);
+#else
+	vmcb_t* const vmcb = get_vmcb();
+
+	vmcb->save_state.cr3 = guest_cr3.flags;
+#endif
 }
 
 cr3 arch::get_slat_cr3()

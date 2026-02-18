@@ -6,6 +6,7 @@
 
 #include "../hypercall/hypercall.h"
 #include "../hook/hook.h"
+#include "../pdb/pdb.hpp"
 
 #include <portable_executable/image.hpp>
 
@@ -351,6 +352,95 @@ std::uint8_t parse_ntoskrnl()
 	return 1;
 }
 
+// EPROCESS offsets resolved dynamically via PDB (see resolve_offsets_from_pdb)
+// Fallback values for Windows 11 22H2+ if PDB download fails
+namespace eprocess_offsets_fallback
+{
+	constexpr std::uint64_t active_process_links = 0x448;
+	constexpr std::uint64_t unique_process_id = 0x440;
+	constexpr std::uint64_t directory_table_base = 0x28;
+	constexpr std::uint64_t image_file_name = 0x5A8;
+	constexpr std::uint64_t section_base_address = 0x520;
+	constexpr std::uint64_t peb = 0x550;
+	constexpr std::uint64_t peb_kernel_callback_table = 0x58;
+}
+
+std::uint8_t resolve_offsets_from_pdb()
+{
+	std::println("[pdb] resolving EPROCESS/PEB offsets from ntoskrnl.pdb...");
+
+	std::string pdb_path = pdb_download("C:\\Windows\\System32\\ntoskrnl.exe");
+
+	if (pdb_path.empty())
+	{
+		std::println("[pdb] failed to download PDB, using fallback offsets");
+		return 0;
+	}
+
+	pdb_context pdb_ctx = {};
+
+	if (!pdb_load(pdb_path, &pdb_ctx))
+	{
+		std::println("[pdb] failed to load PDB, using fallback offsets");
+		return 0;
+	}
+
+	auto resolve = [&](const std::string& struct_name, const std::wstring& property_name) -> std::uint64_t {
+		ULONG offset = pdb_get_struct_property_offset(&pdb_ctx, struct_name, property_name);
+		if (offset == static_cast<ULONG>(-1))
+		{
+			std::println("[pdb] WARNING: failed to resolve {}.{}", struct_name, sys::user::to_string(std::wstring(property_name)));
+			return 0;
+		}
+		return static_cast<std::uint64_t>(offset);
+	};
+
+	sys::offsets::eprocess_active_process_links = resolve("_EPROCESS", L"ActiveProcessLinks");
+	sys::offsets::eprocess_unique_process_id = resolve("_EPROCESS", L"UniqueProcessId");
+	// DirectoryTableBase is in _KPROCESS (first member of _EPROCESS at offset 0)
+	sys::offsets::eprocess_directory_table_base = resolve("_KPROCESS", L"DirectoryTableBase");
+	sys::offsets::eprocess_image_file_name = resolve("_EPROCESS", L"ImageFileName");
+	sys::offsets::eprocess_section_base_address = resolve("_EPROCESS", L"SectionBaseAddress");
+	sys::offsets::eprocess_peb = resolve("_EPROCESS", L"Peb");
+	sys::offsets::peb_kernel_callback_table = resolve("_PEB", L"KernelCallbackTable");
+
+	std::println("[pdb] EPROCESS offsets: APL=0x{:X} PID=0x{:X} DTB=0x{:X} IFN=0x{:X} SBA=0x{:X} PEB=0x{:X}",
+		sys::offsets::eprocess_active_process_links,
+		sys::offsets::eprocess_unique_process_id,
+		sys::offsets::eprocess_directory_table_base,
+		sys::offsets::eprocess_image_file_name,
+		sys::offsets::eprocess_section_base_address,
+		sys::offsets::eprocess_peb);
+	std::println("[pdb] PEB offsets: KCT=0x{:X}", sys::offsets::peb_kernel_callback_table);
+
+	// resolve MmAccessFault RVA for EPT hook
+	ULONG mmaf_rva = pdb_get_rva(&pdb_ctx, "MmAccessFault");
+	if (mmaf_rva != 0 && mmaf_rva != static_cast<ULONG>(-1))
+	{
+		sys::offsets::mm_access_fault_rva = static_cast<std::uint64_t>(mmaf_rva);
+		std::println("[pdb] MmAccessFault RVA: 0x{:X}", sys::offsets::mm_access_fault_rva);
+	}
+	else
+	{
+		std::println("[pdb] WARNING: failed to resolve MmAccessFault RVA");
+	}
+
+	pdb_unload(pdb_path, &pdb_ctx);
+
+	return 1;
+}
+
+void apply_fallback_offsets()
+{
+	sys::offsets::eprocess_active_process_links = eprocess_offsets_fallback::active_process_links;
+	sys::offsets::eprocess_unique_process_id = eprocess_offsets_fallback::unique_process_id;
+	sys::offsets::eprocess_directory_table_base = eprocess_offsets_fallback::directory_table_base;
+	sys::offsets::eprocess_image_file_name = eprocess_offsets_fallback::image_file_name;
+	sys::offsets::eprocess_section_base_address = eprocess_offsets_fallback::section_base_address;
+	sys::offsets::eprocess_peb = eprocess_offsets_fallback::peb;
+	sys::offsets::peb_kernel_callback_table = eprocess_offsets_fallback::peb_kernel_callback_table;
+}
+
 std::uint8_t sys::set_up()
 {
 	current_cr3 = hypercall::read_guest_cr3();
@@ -360,6 +450,13 @@ std::uint8_t sys::set_up()
 		std::println("hyperv-attachment doesn't seem to be loaded");
 
 		return 0;
+	}
+
+	// resolve EPROCESS/PEB offsets from PDB (fallback to hardcoded if fails)
+	if (resolve_offsets_from_pdb() == 0)
+	{
+		std::println("using fallback hardcoded offsets");
+		apply_fallback_offsets();
 	}
 
 	if (parse_ntoskrnl() == 0)
@@ -473,4 +570,91 @@ std::uint8_t sys::fs::write_to_disk(const std::string_view full_path, const std:
 	file.write(reinterpret_cast<const char*>(buffer.data()), buffer.size());
 
 	return file.good();
+}
+
+std::vector<sys::process_info_t> sys::process::enumerate_processes()
+{
+	std::vector<process_info_t> processes;
+
+	const std::string ntoskrnl_name = "ntoskrnl.exe";
+
+	if (kernel::modules_list.contains(ntoskrnl_name) == false)
+	{
+		return processes;
+	}
+
+	const kernel_module_t& ntoskrnl = kernel::modules_list[ntoskrnl_name];
+
+	const std::string ps_initial_system_process_name = "ntoskrnl.exe!PsInitialSystemProcess";
+
+	if (ntoskrnl.exports.contains(ps_initial_system_process_name) == false)
+	{
+		return processes;
+	}
+
+	const std::uint64_t ps_initial_system_process_ptr = ntoskrnl.exports.at(ps_initial_system_process_name);
+
+	// Read the pointer to System EPROCESS
+	const std::uint64_t system_eprocess = read_kernel_virtual_memory<std::uint64_t>(ps_initial_system_process_ptr);
+
+	if (system_eprocess == 0)
+	{
+		return processes;
+	}
+
+	std::uint64_t current_eprocess = system_eprocess;
+
+	do
+	{
+		process_info_t process = { };
+
+		process.eprocess = current_eprocess;
+
+		// Read PID
+		process.pid = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_unique_process_id);
+
+		// Read CR3 (DirectoryTableBase)
+		process.cr3 = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_directory_table_base);
+
+		// Read ImageFileName (15 chars max)
+		char image_file_name[16] = { 0 };
+		hypercall::read_guest_virtual_memory(image_file_name, current_eprocess + sys::offsets::eprocess_image_file_name, current_cr3, 15);
+		process.name = std::string(image_file_name);
+
+		// Read SectionBaseAddress (image base)
+		process.base_address = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_section_base_address);
+
+		processes.push_back(process);
+
+		// Get next process via ActiveProcessLinks.Flink
+		std::uint64_t flink = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_active_process_links);
+
+		// flink points to ActiveProcessLinks of next process, subtract offset to get EPROCESS base
+		current_eprocess = flink - sys::offsets::eprocess_active_process_links;
+
+	} while (current_eprocess != system_eprocess && current_eprocess != 0);
+
+	return processes;
+}
+
+std::optional<sys::process_info_t> sys::process::find_process_by_name(const std::string& name)
+{
+	const std::vector<process_info_t> processes = enumerate_processes();
+
+	for (const auto& process : processes)
+	{
+		// Case-insensitive comparison
+		std::string process_name_lower = process.name;
+		std::string search_name_lower = name;
+
+		std::transform(process_name_lower.begin(), process_name_lower.end(), process_name_lower.begin(), ::tolower);
+		std::transform(search_name_lower.begin(), search_name_lower.end(), search_name_lower.begin(), ::tolower);
+
+		if (process_name_lower.find(search_name_lower) != std::string::npos)
+		{
+			return process;
+		}
+	}
+
+	return std::nullopt;
 }
