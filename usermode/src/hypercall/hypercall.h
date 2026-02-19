@@ -21,10 +21,15 @@ namespace hypercall
 	std::uint64_t clone_guest_cr3(std::uint64_t target_cr3);
 	std::uint64_t setup_hidden_region(std::uint64_t pml4_index);
 	std::uint64_t map_hidden_page(std::uint64_t page_index);
+	std::uint64_t set_user_cr3(std::uint64_t user_cr3);
+	std::uint64_t clear_user_cr3();
 	std::uint64_t enable_cr3_intercept(std::uint64_t target_cr3, std::uint64_t cloned_cr3);
 	std::uint64_t disable_cr3_intercept();
 	std::uint64_t enable_cr3_enforce();
 	std::uint64_t disable_cr3_enforce();
+	std::uint64_t read_mmaf_hit_count();
+	std::uint64_t arm_syscall_hijack(std::uint64_t shellcode_va);
+	std::uint64_t disarm_syscall_hijack();
 
 	std::uint64_t add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address);
 	std::uint64_t remove_slat_code_hook(std::uint64_t target_guest_physical_address);

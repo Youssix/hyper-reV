@@ -363,6 +363,13 @@ namespace eprocess_offsets_fallback
 	constexpr std::uint64_t section_base_address = 0x520;
 	constexpr std::uint64_t peb = 0x550;
 	constexpr std::uint64_t peb_kernel_callback_table = 0x58;
+
+	// thread offsets (Win11 22H2+)
+	constexpr std::uint64_t eprocess_thread_list_head = 0x5E0;
+	constexpr std::uint64_t ethread_thread_list_entry = 0x538;
+	constexpr std::uint64_t kthread_trap_frame = 0x90;
+	constexpr std::uint64_t kthread_state = 0x184;
+	constexpr std::uint64_t kthread_process = 0x220;
 }
 
 std::uint8_t resolve_offsets_from_pdb()
@@ -413,6 +420,20 @@ std::uint8_t resolve_offsets_from_pdb()
 		sys::offsets::eprocess_peb);
 	std::println("[pdb] PEB offsets: KCT=0x{:X}", sys::offsets::peb_kernel_callback_table);
 
+	// thread offsets for syscall hijack
+	sys::offsets::eprocess_thread_list_head = resolve("_EPROCESS", L"ThreadListHead");
+	sys::offsets::ethread_thread_list_entry = resolve("_ETHREAD", L"ThreadListEntry");
+	sys::offsets::kthread_trap_frame = resolve("_KTHREAD", L"TrapFrame");
+	sys::offsets::kthread_state = resolve("_KTHREAD", L"State");
+	sys::offsets::kthread_process = resolve("_KTHREAD", L"Process");
+
+	std::println("[pdb] Thread offsets: TLH=0x{:X} TLE=0x{:X} TF=0x{:X} KS=0x{:X} KP=0x{:X}",
+		sys::offsets::eprocess_thread_list_head,
+		sys::offsets::ethread_thread_list_entry,
+		sys::offsets::kthread_trap_frame,
+		sys::offsets::kthread_state,
+		sys::offsets::kthread_process);
+
 	// resolve MmAccessFault RVA for EPT hook
 	ULONG mmaf_rva = pdb_get_rva(&pdb_ctx, "MmAccessFault");
 	if (mmaf_rva != 0 && mmaf_rva != static_cast<ULONG>(-1))
@@ -423,6 +444,24 @@ std::uint8_t resolve_offsets_from_pdb()
 	else
 	{
 		std::println("[pdb] WARNING: failed to resolve MmAccessFault RVA");
+	}
+
+	// resolve KiSystemServiceExit RVA for syscall return EPT hook
+	ULONG ksse_rva = pdb_get_rva(&pdb_ctx, "KiSystemServiceExit");
+	if (ksse_rva != 0 && ksse_rva != static_cast<ULONG>(-1))
+	{
+		sys::offsets::ki_system_service_exit_rva = static_cast<std::uint64_t>(ksse_rva);
+		std::println("[pdb] KiSystemServiceExit RVA: 0x{:X}", sys::offsets::ki_system_service_exit_rva);
+	}
+	else
+	{
+		std::println("[pdb] WARNING: KiSystemServiceExit not found, trying KiSystemCall64Shadow...");
+		// fallback: try to find via KiSystemCall64Shadow
+		ULONG ksc64_rva = pdb_get_rva(&pdb_ctx, "KiSystemCall64Shadow");
+		if (ksc64_rva == 0 || ksc64_rva == static_cast<ULONG>(-1))
+			ksc64_rva = pdb_get_rva(&pdb_ctx, "KiSystemCall64");
+		if (ksc64_rva != 0 && ksc64_rva != static_cast<ULONG>(-1))
+			std::println("[pdb] KiSystemCall64 RVA: 0x{:X} (will need signature scan for exit point)", ksc64_rva);
 	}
 
 	pdb_unload(pdb_path, &pdb_ctx);
@@ -439,6 +478,13 @@ void apply_fallback_offsets()
 	sys::offsets::eprocess_section_base_address = eprocess_offsets_fallback::section_base_address;
 	sys::offsets::eprocess_peb = eprocess_offsets_fallback::peb;
 	sys::offsets::peb_kernel_callback_table = eprocess_offsets_fallback::peb_kernel_callback_table;
+
+	// thread offsets
+	sys::offsets::eprocess_thread_list_head = eprocess_offsets_fallback::eprocess_thread_list_head;
+	sys::offsets::ethread_thread_list_entry = eprocess_offsets_fallback::ethread_thread_list_entry;
+	sys::offsets::kthread_trap_frame = eprocess_offsets_fallback::kthread_trap_frame;
+	sys::offsets::kthread_state = eprocess_offsets_fallback::kthread_state;
+	sys::offsets::kthread_process = eprocess_offsets_fallback::kthread_process;
 }
 
 std::uint8_t sys::set_up()
@@ -656,5 +702,84 @@ std::optional<sys::process_info_t> sys::process::find_process_by_name(const std:
 		}
 	}
 
+	return std::nullopt;
+}
+
+std::optional<sys::thread_info_t> sys::thread::find_hijackable_thread(
+	std::uint64_t eprocess, std::uint64_t cr3)
+{
+	// read ThreadListHead (LIST_ENTRY) from EPROCESS
+	std::uint64_t list_head_flink = read_kernel_virtual_memory<std::uint64_t>(
+		eprocess + offsets::eprocess_thread_list_head);
+
+	if (list_head_flink == 0)
+	{
+		std::println("[-] ThreadListHead.Flink is NULL");
+		return std::nullopt;
+	}
+
+	std::uint64_t list_head_addr = eprocess + offsets::eprocess_thread_list_head;
+	std::uint64_t current_entry = list_head_flink;
+	int threads_checked = 0;
+
+	while (current_entry != list_head_addr && current_entry != 0)
+	{
+		threads_checked++;
+
+		// LIST_ENTRY points into ETHREAD at ThreadListEntry offset
+		// ETHREAD base = current_entry - ethread_thread_list_entry offset
+		std::uint64_t ethread = current_entry - offsets::ethread_thread_list_entry;
+
+		// KTHREAD is at offset 0 of ETHREAD (first member)
+		// Read KTHREAD.State (UCHAR)
+		std::uint8_t thread_state = read_kernel_virtual_memory<std::uint8_t>(
+			ethread + offsets::kthread_state);
+
+		// Read KTHREAD.TrapFrame pointer for diagnostics
+		std::uint64_t trap_frame_ptr = read_kernel_virtual_memory<std::uint64_t>(
+			ethread + offsets::kthread_trap_frame);
+
+		std::uint64_t saved_rip = 0;
+		std::uint64_t saved_rsp = 0;
+		if (trap_frame_ptr != 0)
+		{
+			saved_rip = read_kernel_virtual_memory<std::uint64_t>(
+				trap_frame_ptr + offsets::ktrap_frame_rip);
+			saved_rsp = read_kernel_virtual_memory<std::uint64_t>(
+				trap_frame_ptr + offsets::ktrap_frame_rsp);
+		}
+
+		std::println("[*] Thread #{}: ETHREAD=0x{:X}, State={}, TrapFrame=0x{:X}, RIP=0x{:X}, RSP=0x{:X} {}",
+			threads_checked, ethread, thread_state, trap_frame_ptr, saved_rip, saved_rsp,
+			(thread_state == 5 && saved_rip != 0 && saved_rip < 0xFFFF800000000000ull) ? "<-- CANDIDATE" : "");
+
+		// State 5 = Waiting (kernel wait state — thread is blocked in syscall)
+		if (thread_state == 5)
+		{
+			if (trap_frame_ptr != 0)
+			{
+				// Saved RIP should be in usermode (< 0xFFFF800000000000)
+				// This means the thread entered kernel from user mode via syscall
+				if (saved_rip != 0 && saved_rip < 0xFFFF800000000000ull)
+				{
+					std::println("[+] Selected thread #{} for hijack", threads_checked);
+
+					thread_info_t info = {};
+					info.ethread = ethread;
+					info.trap_frame_ptr = trap_frame_ptr;
+					info.saved_rip = saved_rip;
+					info.saved_rsp = saved_rsp;
+					return info;
+				}
+			}
+		}
+
+		// Follow linked list: read Flink of current LIST_ENTRY
+		current_entry = read_kernel_virtual_memory<std::uint64_t>(current_entry);
+
+		if (threads_checked > 256) break; // safety limit
+	}
+
+	std::println("[-] No hijackable thread found (checked {} threads)", threads_checked);
 	return std::nullopt;
 }

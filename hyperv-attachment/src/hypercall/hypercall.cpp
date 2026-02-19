@@ -16,6 +16,7 @@
 
 #include <ia32-doc/ia32.hpp>
 #include <hypercall/hypercall_def.h>
+#include <intrin.h>
 
 std::uint64_t operate_on_guest_physical_memory(const trap_frame_t* const trap_frame, const memory_operation_t operation)
 {
@@ -289,6 +290,48 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             cr3_intercept::enforce_active = 0;
             trap_frame->rax = 1;
         }
+        else if (hypercall_info.call_reserved_data == 6)
+        {
+            trap_frame->rax = cr3_intercept::mmaf_hit_count;
+        }
+        else if (hypercall_info.call_reserved_data == 7)
+        {
+            // check_and_clear_syscall_hijack: atomically disarm and return shellcode_va
+            // RDX = original_rip (passed by ring-0 shellcode from TrapFrame.Rip)
+            // Uses xchg for atomicity (multiple VCPUs may fire simultaneously)
+            const char was_armed = _InterlockedExchange8(
+                reinterpret_cast<volatile char*>(&cr3_intercept::syscall_hijack_armed), 0);
+
+            if (was_armed)
+            {
+                cr3_intercept::saved_original_rip = trap_frame->rdx; // save original RIP from ring-0 shellcode
+                trap_frame->rax = cr3_intercept::syscall_hijack_shellcode_va;
+            }
+            else
+            {
+                trap_frame->rax = 0;
+            }
+        }
+        else if (hypercall_info.call_reserved_data == 8)
+        {
+            // arm_syscall_hijack: set shellcode VA and arm
+            cr3_intercept::syscall_hijack_shellcode_va = trap_frame->rdx;
+            cr3_intercept::syscall_hijack_armed = 1;
+            trap_frame->rax = 1;
+        }
+        else if (hypercall_info.call_reserved_data == 9)
+        {
+            // disarm_syscall_hijack
+            cr3_intercept::syscall_hijack_armed = 0;
+            cr3_intercept::syscall_hijack_shellcode_va = 0;
+            trap_frame->rax = 1;
+        }
+        else if (hypercall_info.call_reserved_data == 10)
+        {
+            // retrieve_original_rip: returns saved_original_rip (set by reserved_data=7)
+            // Used by DllMain shellcode to jump back after execution
+            trap_frame->rax = cr3_intercept::saved_original_rip;
+        }
         else
         {
             const cr3 guest_cr3 = arch::get_guest_cr3();
@@ -362,6 +405,8 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
     }
     case hypercall_type_t::write_guest_cr3:
     {
+        cr3_intercept::mmaf_hit_count++;
+
         const cr3 new_guest_cr3 = { .flags = trap_frame->rdx };
 
         arch::set_guest_cr3(new_guest_cr3);
@@ -411,18 +456,28 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             const std::uint64_t pd_pa = memory_manager::unmap_host_physical(pd_va);
             const std::uint64_t pt_pa = memory_manager::unmap_host_physical(pt_va);
 
-            // un-hide all 3 pages in EPT
+            // un-hide all 3 pages in EPT — must set RWX bits for guest access
             auto unhide = [&](std::uint64_t pa)
             {
                 slat_pte* const pte = slat::get_pte(slat_cr3, { .address = pa }, 1);
                 if (pte != nullptr)
+                {
                     pte->page_frame_number = pa >> 12;
+                    pte->read_access = 1;
+                    pte->write_access = 1;
+                    pte->execute_access = 1;
+                }
 
                 if (hook.flags != 0)
                 {
                     slat_pte* const pte_hook = slat::get_pte(hook, { .address = pa }, 1);
                     if (pte_hook != nullptr)
+                    {
                         pte_hook->page_frame_number = pa >> 12;
+                        pte_hook->read_access = 1;
+                        pte_hook->write_access = 1;
+                        pte_hook->execute_access = 1;
+                    }
                 }
             };
 
@@ -488,16 +543,26 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
 
             const std::uint64_t data_pa = memory_manager::unmap_host_physical(data_page_va);
 
-            // un-hide in EPT
+            // un-hide in EPT — must set RWX bits for guest CPU access
             slat_pte* const pte_hyperv = slat::get_pte(slat_cr3, { .address = data_pa }, 1);
             if (pte_hyperv != nullptr)
+            {
                 pte_hyperv->page_frame_number = data_pa >> 12;
+                pte_hyperv->read_access = 1;
+                pte_hyperv->write_access = 1;
+                pte_hyperv->execute_access = 1;
+            }
 
             if (hook.flags != 0)
             {
                 slat_pte* const pte_hook = slat::get_pte(hook, { .address = data_pa }, 1);
                 if (pte_hook != nullptr)
+                {
                     pte_hook->page_frame_number = data_pa >> 12;
+                    pte_hook->read_access = 1;
+                    pte_hook->write_access = 1;
+                    pte_hook->execute_access = 1;
+                }
             }
 
             // set PT[page_index] -> data page
@@ -510,6 +575,21 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             // return the physical address of the data page
             trap_frame->rax = data_pa;
 
+            break;
+        }
+        else if (hypercall_info.call_reserved_data == 3)
+        {
+            // set_user_cr3: register UserDirectoryTableBase PFN for CR3 write interception
+            // MOV CR3 handler will swap to clone when it sees this PFN (KPTI fix)
+            cr3_intercept::target_user_cr3 = trap_frame->rdx;
+            trap_frame->rax = 1;
+            break;
+        }
+        else if (hypercall_info.call_reserved_data == 4)
+        {
+            // clear_user_cr3: stop intercepting UserDirectoryTableBase writes
+            cr3_intercept::target_user_cr3 = 0;
+            trap_frame->rax = 1;
             break;
         }
 
@@ -626,6 +706,7 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
 
         // disable intercept flag first (other VCPUs will see this immediately)
         cr3_intercept::enabled = 0;
+        cr3_intercept::enforce_active = 0;
 
         // if current guest CR3 is the clone, restore original
         const cr3 current_guest_cr3 = arch::get_guest_cr3();
@@ -645,10 +726,13 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
 
         // clear state
         cr3_intercept::target_original_cr3 = 0;
+        cr3_intercept::target_user_cr3 = 0;
         cr3_intercept::cloned_cr3_value = 0;
         cr3_intercept::cloned_pml4_host_va = nullptr;
         cr3_intercept::hidden_pt_host_va = nullptr;
         cr3_intercept::reserved_pml4e_index = 512;
+        cr3_intercept::syscall_hijack_armed = 0;
+        cr3_intercept::syscall_hijack_shellcode_va = 0;
 
         trap_frame->rax = 1;
 

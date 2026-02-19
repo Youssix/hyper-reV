@@ -951,9 +951,23 @@ void process_unhookmmaf(CLI::App* unhookmmaf)
 	}
 }
 
+CLI::App* init_mmafstat(CLI::App& app)
+{
+	CLI::App* mmafstat = app.add_subcommand("mmafstat", "show MmAccessFault hook hit counter")->ignore_case();
+
+	return mmafstat;
+}
+
+void process_mmafstat(CLI::App* mmafstat)
+{
+	const std::uint64_t hit_count = hypercall::read_mmaf_hit_count();
+
+	std::println("mmaf_hit_count = {}", hit_count);
+}
+
 CLI::App* init_injectdll(CLI::App& app)
 {
-	CLI::App* injectdll = app.add_subcommand("injectdll", "inject a DLL into a process using hidden memory (PE manual map + KCT hijack)")->ignore_case();
+	CLI::App* injectdll = app.add_subcommand("injectdll", "inject a DLL into a process using hidden memory (PE manual map + syscall exit EPT hook)")->ignore_case();
 
 	add_command_option(injectdll, "dll_path")->required();
 	add_command_option(injectdll, "process_name")->required();
@@ -978,6 +992,17 @@ void process_injectdll(CLI::App* injectdll)
 	{
 		std::println("[-] Injection failed");
 	}
+}
+
+CLI::App* init_uninject(CLI::App& app)
+{
+	return app.add_subcommand("uninject", "tear down all injection hooks and restore clean state")->ignore_case();
+}
+
+void process_uninject(CLI::App* uninject)
+{
+	if (!uninject->parsed()) return;
+	inject::uninject();
 }
 
 std::unordered_map<std::string, std::uint64_t> form_aliases()
@@ -1043,7 +1068,9 @@ void commands::process(const std::string command)
 	CLI::App* sethidden = init_sethidden(app, aliases_transformer);
 	CLI::App* hookmmaf = init_hookmmaf(app, aliases_transformer);
 	CLI::App* unhookmmaf = init_unhookmmaf(app);
+	CLI::App* mmafstat = init_mmafstat(app);
 	CLI::App* injectdll = init_injectdll(app);
+	CLI::App* uninject = init_uninject(app);
 
 	try
 	{
@@ -1081,7 +1108,9 @@ void commands::process(const std::string command)
 		d_process_command(sethidden);
 		d_process_command(hookmmaf);
 		d_process_command(unhookmmaf);
+		d_process_command(mmafstat);
 		d_process_command(injectdll);
+		d_process_command(uninject);
 	}
 	catch (const CLI::ParseError& error)
 	{

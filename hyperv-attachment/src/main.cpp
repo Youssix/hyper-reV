@@ -148,10 +148,22 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 
                 cr3_intercept::cr3_last_seen = new_cr3_value;
 
-                if (cr3_intercept::enabled && (new_cr3_value & cr3_intercept::cr3_pfn_mask) == (cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask))
+                if (cr3_intercept::enabled)
                 {
-                    arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
-                    cr3_intercept::cr3_swap_count++;
+                    const std::uint64_t new_pfn = new_cr3_value & cr3_intercept::cr3_pfn_mask;
+                    const bool is_kernel_dtb = new_pfn == (cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask);
+                    const bool is_user_dtb = cr3_intercept::target_user_cr3 != 0 &&
+                        new_pfn == (cr3_intercept::target_user_cr3 & cr3_intercept::cr3_pfn_mask);
+
+                    if (is_kernel_dtb || is_user_dtb)
+                    {
+                        arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
+                        cr3_intercept::cr3_swap_count++;
+                    }
+                    else
+                    {
+                        arch::set_guest_cr3({ .flags = new_cr3_value });
+                    }
                 }
                 else
                 {
@@ -164,7 +176,9 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
             {
                 const cr3 current_cr3 = arch::get_guest_cr3();
 
-                const std::uint64_t value_to_return = (cr3_intercept::enabled && (current_cr3.flags & cr3_intercept::cr3_pfn_mask) == (cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask))
+                // if running under clone, spoof back the kernel DTB (hide clone from guest)
+                const std::uint64_t value_to_return = (cr3_intercept::enabled &&
+                    (current_cr3.flags & cr3_intercept::cr3_pfn_mask) == (cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask))
                     ? cr3_intercept::target_original_cr3
                     : current_cr3.flags;
 

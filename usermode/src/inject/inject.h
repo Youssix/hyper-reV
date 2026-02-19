@@ -10,27 +10,13 @@
 #include "../hypercall/hypercall.h"
 #include "../system/system.h"
 #include "../hook/hook.h"
+#include "../hook/kernel_detour_holder.h"
 #include <hypercall/hypercall_def.h>
 
 namespace inject
 {
 
-//=============================================================================
-// DllMain Shellcode (from PhysInj GameInjector.h)
-//=============================================================================
-static BYTE g_RemoteCallDllMain[92] = {
-	0x48, 0x83, 0xEC, 0x38, 0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x20, 0x48, 0x8B, 0x44, 0x24,
-	0x20, 0x83, 0x38, 0x00, 0x75, 0x39, 0x48, 0x8B, 0x44, 0x24, 0x20, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x44, 0x24, 0x20, 0x48,
-	0x8B, 0x40, 0x08, 0x48, 0x89, 0x44, 0x24, 0x28, 0x45, 0x33, 0xC0, 0xBA, 0x01, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x44, 0x24, 0x20, 0x48, 0x8B,
-	0x48, 0x10, 0xFF, 0x54, 0x24, 0x28, 0x48, 0x8B, 0x44, 0x24, 0x20, 0xC7, 0x00, 0x02, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x38, 0xC3, 0xCC
-};
-static const DWORD g_ShellDataOffset = 0x6;
-
-typedef struct _DLLMAIN_STRUCT {
-	INT Status;
-	uintptr_t FnDllMain;
-	HINSTANCE DllBase;
-} DLLMAIN_STRUCT, *PDLLMAIN_STRUCT;
+// forward declare — full definition in the syscall exit hook section
 
 //=============================================================================
 // PE helpers
@@ -189,187 +175,492 @@ inline bool write_sections(PVOID local_image, PIMAGE_NT_HEADERS64 nt_headers,
 }
 
 //=============================================================================
-// KCT Hijack - trigger DllMain via KernelCallbackTable
+// Syscall Exit EPT Hook — trigger DllMain at exact syscall return point
+// Hooks KiSystemServiceExit so the trap frame is modified at the moment
+// the kernel is done, right before IRETQ/SYSRET. One-shot via CPUID hypercall.
 //=============================================================================
 
-inline HWND find_target_window(DWORD target_pid)
+// Hijack data struct in hidden memory — only used by DllMain shellcode (usermode)
+// original_rip and armed are now handled entirely by the hypervisor (no hidden memory access from ring 0)
+typedef struct _HIJACK_DATA {
+	INT Status;              // 0=pending, 1=running, 2=done
+	INT _pad;
+	uintptr_t FnDllMain;
+	HINSTANCE DllBase;
+} HIJACK_DATA;
+
+inline std::uint64_t ksse_hook_va = 0; // stored for removal
+inline std::uint16_t ksse_shellcode_detour_offset = 0; // detour holder allocation for our shellcode
+
+// Build the EPT hook shellcode for KiSystemServiceExit (runs in ring 0)
+// Stored in the detour holder page (not in extra_assembled_bytes, to avoid
+// displacing 100+ bytes of original code — which breaks RIP-relative fixups).
+//
+// CRITICAL: NO hidden memory (PML4[70]) access from ring 0!
+// The CR3 may be the original (not clone) when this fires.
+// PML4[70] only exists in the clone → accessing it under original CR3 = #PF BSOD.
+//
+// All data exchange with hypervisor via CPUID hypercall:
+//   - original_rip passed to handler in RDX (handler saves it)
+//   - shellcode_va returned in RAX (handler returns it)
+//
+// Flow:
+//   1. EPROCESS check (kernel memory — always accessible) → mismatch → skip
+//   2. Read TrapFrame.Rip (kernel memory — always accessible)
+//   3. CPUID atomic claim: pass original_rip in RDX → get shellcode_va in RAX
+//   4. Write shellcode_va to TrapFrame.Rip
+inline std::vector<uint8_t> build_syscall_exit_hook(
+	std::uint64_t target_eprocess,
+	std::uint32_t kthread_process_offset,
+	std::uint32_t kthread_trapframe_offset)
 {
-	struct EnumData { DWORD pid; HWND hwnd; };
-	EnumData data = { target_pid, nullptr };
+	std::vector<uint8_t> sc;
+	sc.reserve(100);
 
-	EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
-		auto* data = (EnumData*)lParam;
-		DWORD window_pid = 0;
-		GetWindowThreadProcessId(hwnd, &window_pid);
-		if (window_pid == data->pid && IsWindowVisible(hwnd))
-		{
-			data->hwnd = hwnd;
-			return FALSE;
-		}
-		return TRUE;
-	}, (LPARAM)&data);
+	auto push_u8 = [&](uint8_t b) { sc.push_back(b); };
+	auto push_u32 = [&](uint32_t v) {
+		for (int i = 0; i < 4; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+	auto push_u64 = [&](uint64_t v) {
+		for (int i = 0; i < 8; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
 
-	return data.hwnd;
+	// Build the check_and_clear hypercall info (reserved_data=7 under read_guest_cr3)
+	hypercall_info_t hijack_call = {};
+	hijack_call.primary_key = hypercall_primary_key;
+	hijack_call.secondary_key = hypercall_secondary_key;
+	hijack_call.call_type = hypercall_type_t::read_guest_cr3;
+	hijack_call.call_reserved_data = 7;
+	std::uint32_t hijack_call_value = static_cast<std::uint32_t>(hijack_call.value);
+
+	// push rax, rcx, rdx, rbx
+	push_u8(0x50); // push rax
+	push_u8(0x51); // push rcx
+	push_u8(0x52); // push rdx
+	push_u8(0x53); // push rbx
+
+	// === Stage 1: EPROCESS check (kernel memory, always accessible) ===
+
+	// mov rax, gs:[0x188]  — KPCR.CurrentThread
+	push_u8(0x65); push_u8(0x48); push_u8(0x8B); push_u8(0x04); push_u8(0x25);
+	push_u8(0x88); push_u8(0x01); push_u8(0x00); push_u8(0x00);
+
+	// mov rcx, [rax + kthread_process_offset]  — KTHREAD.Process → EPROCESS
+	push_u8(0x48); push_u8(0x8B); push_u8(0x88);
+	push_u32(kthread_process_offset);
+
+	// movabs rdx, <target_eprocess>
+	push_u8(0x48); push_u8(0xBA);
+	push_u64(target_eprocess);
+
+	// cmp rcx, rdx
+	push_u8(0x48); push_u8(0x3B); push_u8(0xCA);
+
+	// jne .skip
+	push_u8(0x75);
+	const std::size_t jne1_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// === Stage 2: Read TrapFrame.Rip (kernel memory, always accessible) ===
+
+	// mov rcx, [rax + kthread_trapframe_offset]  — TrapFrame ptr
+	push_u8(0x48); push_u8(0x8B); push_u8(0x88);
+	push_u32(kthread_trapframe_offset);
+
+	// mov rdx, [rcx + 0x168]  — original TrapFrame.Rip → RDX (passed to CPUID handler)
+	push_u8(0x48); push_u8(0x8B); push_u8(0x91);
+	push_u32(0x168);
+
+	// === Stage 3: CPUID atomic claim (one VMEXIT, happens once) ===
+	// RDX = original_rip (handler saves it)
+	// Handler returns shellcode_va in RAX (or 0 if not armed / already claimed)
+
+	// mov ecx, <hijack_call_value>
+	push_u8(0xB9);
+	push_u32(hijack_call_value);
+
+	// cpuid  — VMEXIT: handler reads RDX, atomically disarms, returns shellcode_va
+	push_u8(0x0F); push_u8(0xA2);
+
+	// test rax, rax  (0 = not armed or race lost)
+	push_u8(0x48); push_u8(0x85); push_u8(0xC0);
+
+	// jz .skip
+	push_u8(0x74);
+	const std::size_t jz_cpuid_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// === Stage 4: Claimed! RAX = shellcode_va ===
+
+	// Re-read CurrentThread → TrapFrame (CPUID handler didn't clobber RCX/RDX
+	// but ECX was set to hijack_call_value, so re-read to be safe)
+	// mov rcx, gs:[0x188]
+	push_u8(0x65); push_u8(0x48); push_u8(0x8B); push_u8(0x0C); push_u8(0x25);
+	push_u8(0x88); push_u8(0x01); push_u8(0x00); push_u8(0x00);
+
+	// mov rcx, [rcx + kthread_trapframe_offset]  — TrapFrame ptr
+	push_u8(0x48); push_u8(0x8B); push_u8(0x89);
+	push_u32(kthread_trapframe_offset);
+
+	// mov [rcx + 0x168], rax  — overwrite TrapFrame.Rip = shellcode_va
+	push_u8(0x48); push_u8(0x89); push_u8(0x81);
+	push_u32(0x168);
+
+	// .skip:
+	const std::size_t skip_pos = sc.size();
+
+	// pop rbx, rdx, rcx, rax
+	push_u8(0x5B); // pop rbx
+	push_u8(0x5A); // pop rdx
+	push_u8(0x59); // pop rcx
+	push_u8(0x58); // pop rax
+
+	// Patch jump offsets
+	sc[jne1_pos] = static_cast<uint8_t>(skip_pos - (jne1_pos + 1));
+	sc[jz_cpuid_pos] = static_cast<uint8_t>(skip_pos - (jz_cpuid_pos + 1));
+
+	return sc;
 }
 
-inline bool call_dll_main(std::uint64_t clone_cr3, std::uint64_t target_cr3,
-                          std::uint64_t target_eprocess, std::uint64_t target_pid,
+// Build the usermode DllMain shellcode (runs in user mode, hidden memory)
+// Retrieves original_rip from hypervisor via CPUID (reserved_data=10)
+// instead of reading from hidden memory (which required ring-0 to write it)
+inline std::vector<uint8_t> build_dllmain_shellcode(
+	std::uint64_t dll_base, std::uint64_t entry_point_va,
+	std::uint64_t data_va, std::uint32_t retrieve_rip_call_value)
+{
+	std::vector<uint8_t> sc;
+	sc.reserve(200);
+
+	auto push_u8 = [&](uint8_t b) { sc.push_back(b); };
+	auto push_u32 = [&](uint32_t v) {
+		for (int i = 0; i < 4; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+	auto push_u64 = [&](uint64_t v) {
+		for (int i = 0; i < 8; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+
+	// === Context save ===
+	push_u8(0x9C);                   // pushfq
+	push_u8(0x50);                   // push rax
+	push_u8(0x51);                   // push rcx
+	push_u8(0x52);                   // push rdx
+	push_u8(0x53);                   // push rbx
+	push_u8(0x6A); push_u8(0xFF);   // push -1 (rsp placeholder)
+	push_u8(0x55);                   // push rbp
+	push_u8(0x56);                   // push rsi
+	push_u8(0x57);                   // push rdi
+	push_u8(0x41); push_u8(0x50);   // push r8
+	push_u8(0x41); push_u8(0x51);   // push r9
+	push_u8(0x41); push_u8(0x52);   // push r10
+	push_u8(0x41); push_u8(0x53);   // push r11
+	push_u8(0x41); push_u8(0x54);   // push r12
+	push_u8(0x41); push_u8(0x55);   // push r13
+	push_u8(0x41); push_u8(0x56);   // push r14
+	push_u8(0x41); push_u8(0x57);   // push r15
+
+	// === Write Status = 1 (shellcode started, before DllMain) ===
+	push_u8(0x48); push_u8(0xB9); push_u64(data_va);      // movabs rcx, data_va
+	push_u8(0xC7); push_u8(0x01); push_u32(1);              // mov dword [rcx], 1
+
+	// === Stack alignment + call DllMain ===
+	push_u8(0x48); push_u8(0x89); push_u8(0xE3);           // mov rbx, rsp
+	push_u8(0x48); push_u8(0x83); push_u8(0xE4); push_u8(0xF0); // and rsp, -16
+	push_u8(0x48); push_u8(0x83); push_u8(0xEC); push_u8(0x30); // sub rsp, 0x30
+
+	push_u8(0x48); push_u8(0xB9); push_u64(dll_base);      // movabs rcx, dll_base (hModule)
+	push_u8(0xBA); push_u32(1);                              // mov edx, 1 (DLL_PROCESS_ATTACH)
+	push_u8(0x45); push_u8(0x33); push_u8(0xC0);           // xor r8d, r8d (lpReserved=NULL)
+	push_u8(0x48); push_u8(0xB8); push_u64(entry_point_va); // movabs rax, entry_point
+	push_u8(0xFF); push_u8(0xD0);                           // call rax
+
+	// === Write Status = 2 (DllMain completed) ===
+	push_u8(0x48); push_u8(0xB9); push_u64(data_va);       // movabs rcx, data_va
+	push_u8(0xC7); push_u8(0x01); push_u32(2);              // mov dword [rcx], 2
+
+	// === Context restore ===
+	push_u8(0x48); push_u8(0x89); push_u8(0xDC);           // mov rsp, rbx
+
+	push_u8(0x41); push_u8(0x5F);   // pop r15
+	push_u8(0x41); push_u8(0x5E);   // pop r14
+	push_u8(0x41); push_u8(0x5D);   // pop r13
+	push_u8(0x41); push_u8(0x5C);   // pop r12
+	push_u8(0x41); push_u8(0x5B);   // pop r11
+	push_u8(0x41); push_u8(0x5A);   // pop r10
+	push_u8(0x41); push_u8(0x59);   // pop r9
+	push_u8(0x41); push_u8(0x58);   // pop r8
+	push_u8(0x5F);                   // pop rdi
+	push_u8(0x5E);                   // pop rsi
+	push_u8(0x5D);                   // pop rbp
+	push_u8(0x48); push_u8(0x83); push_u8(0xC4); push_u8(0x08); // add rsp, 8 (skip rsp placeholder)
+	push_u8(0x5B);                   // pop rbx
+	push_u8(0x5A);                   // pop rdx
+	push_u8(0x59);                   // pop rcx
+	push_u8(0x58);                   // pop rax
+	push_u8(0x9D);                   // popfq
+
+	// === Jump back to original RIP (retrieved from hypervisor via CPUID) ===
+	// CPUID clobbers EAX, EBX, ECX, EDX — must save/restore all four
+	push_u8(0x48); push_u8(0x83); push_u8(0xEC); push_u8(0x08); // sub rsp, 8 (return address slot)
+	push_u8(0x50);                                           // push rax
+	push_u8(0x53);                                           // push rbx  (CPUID clobbers EBX)
+	push_u8(0x51);                                           // push rcx
+	push_u8(0x52);                                           // push rdx  (CPUID clobbers EDX)
+	push_u8(0xB9); push_u32(retrieve_rip_call_value);       // mov ecx, <retrieve_rip_call_value>
+	push_u8(0x0F); push_u8(0xA2);                           // cpuid — RAX = original_rip
+	push_u8(0x48); push_u8(0x89); push_u8(0x44); push_u8(0x24); push_u8(0x20); // mov [rsp+32], rax (4 pushes * 8 = 32)
+	push_u8(0x5A);                                           // pop rdx
+	push_u8(0x59);                                           // pop rcx
+	push_u8(0x5B);                                           // pop rbx
+	push_u8(0x58);                                           // pop rax
+	push_u8(0xC3);                                           // ret → jumps to original_rip
+
+	return sc;
+}
+
+// Helper: build a 14-byte absolute jump (push low32 / mov [rsp+4], high32 / ret)
+inline std::vector<std::uint8_t> build_abs_jmp(std::uint64_t target)
+{
+	std::vector<std::uint8_t> jmp;
+	jmp.reserve(14);
+	jmp.push_back(0x68); // push imm32 (low part)
+	for (int i = 0; i < 4; i++) jmp.push_back(static_cast<uint8_t>(target >> (i * 8)));
+	jmp.push_back(0xC7); jmp.push_back(0x44); jmp.push_back(0x24); jmp.push_back(0x04); // mov [rsp+4], imm32
+	for (int i = 0; i < 4; i++) jmp.push_back(static_cast<uint8_t>(target >> (32 + i * 8)));
+	jmp.push_back(0xC3); // ret
+	return jmp;
+}
+
+// Install EPT hook on KiSystemServiceExit
+// Strategy: store full shellcode in the detour holder page, use only a 14-byte
+// trampoline as extra_assembled_bytes so only ~28 bytes of original code are
+// displaced (instead of ~110, which would break RIP-relative instruction fixups).
+//
+// Flow: KiSystemServiceExit
+//   → [14-byte jmp to shellcode in detour holder]  (extra_assembled_bytes)
+//   → [our shellcode runs: EPROCESS check, TrapFrame.Rip overwrite]
+//   → [14-byte jmp back to hook_va + 14]           (appended to shellcode)
+//   → [14-byte jmp to detour holder original bytes] (add_kernel_hook's jmp_to_detour)
+//   → [original displaced ~28 bytes + jmp back]     (normal detour)
+inline bool install_syscall_exit_hook(std::uint64_t target_eprocess)
+{
+	if (sys::offsets::ki_system_service_exit_rva == 0)
+	{
+		std::println("[-] KiSystemServiceExit RVA not resolved");
+		return false;
+	}
+
+	if (!sys::kernel::modules_list.contains("ntoskrnl.exe"))
+	{
+		std::println("[-] ntoskrnl.exe not in modules list");
+		return false;
+	}
+
+	std::uint64_t ntoskrnl_base = sys::kernel::modules_list["ntoskrnl.exe"].base_address;
+	std::uint64_t ksse_va = ntoskrnl_base + sys::offsets::ki_system_service_exit_rva;
+
+	std::println("[+] KiSystemServiceExit VA: 0x{:X}", ksse_va);
+
+	// 1. Build full ring-0 shellcode (NO hidden memory access)
+	auto full_shellcode = build_syscall_exit_hook(
+		target_eprocess,
+		static_cast<std::uint32_t>(sys::offsets::kthread_process),
+		static_cast<std::uint32_t>(sys::offsets::kthread_trap_frame));
+
+	// Append 14-byte jmp back to ksse_va + 14 (past the trampoline, hits jmp_to_detour)
+	auto return_jmp = build_abs_jmp(ksse_va + 14);
+	full_shellcode.insert(full_shellcode.end(), return_jmp.begin(), return_jmp.end());
+
+	std::println("[+] Syscall exit hook shellcode: {} bytes (with return jmp)", full_shellcode.size());
+
+	// 2. Allocate space in detour holder for our shellcode
+	void* sc_buffer = kernel_detour_holder::allocate_memory(
+		static_cast<std::uint16_t>(full_shellcode.size()));
+
+	if (sc_buffer == nullptr)
+	{
+		std::println("[-] Failed to allocate detour holder space for shellcode");
+		return false;
+	}
+
+	ksse_shellcode_detour_offset = kernel_detour_holder::get_allocation_offset(sc_buffer);
+	memcpy(sc_buffer, full_shellcode.data(), full_shellcode.size());
+
+	std::uint64_t sc_kernel_va = hook::kernel_detour_holder_base + ksse_shellcode_detour_offset;
+
+	std::println("[+] Shellcode in detour holder at offset 0x{:X} (kernel VA: 0x{:X})",
+		ksse_shellcode_detour_offset, sc_kernel_va);
+
+	// 3. Build trampoline: 14-byte jmp to our shellcode in detour holder
+	auto trampoline = build_abs_jmp(sc_kernel_va);
+
+	std::println("[+] Trampoline: {} bytes (only ~28 bytes of original code displaced)", trampoline.size());
+
+	// 4. Install EPT hook with minimal displacement
+	std::vector<std::uint8_t> post_original_bytes; // empty
+
+	std::uint8_t status = hook::add_kernel_hook(ksse_va, trampoline, post_original_bytes);
+
+	if (status == 1)
+	{
+		ksse_hook_va = ksse_va;
+		std::println("[+] KiSystemServiceExit EPT hook installed at 0x{:X}", ksse_va);
+		return true;
+	}
+
+	// Cleanup on failure
+	kernel_detour_holder::free_memory(sc_buffer);
+	ksse_shellcode_detour_offset = 0;
+	std::println("[-] Failed to install KiSystemServiceExit EPT hook");
+	return false;
+}
+
+inline bool remove_syscall_exit_hook()
+{
+	if (ksse_hook_va == 0) return false;
+
+	std::uint8_t status = hook::remove_kernel_hook(ksse_hook_va, 1);
+	if (status == 1)
+	{
+		std::println("[+] KiSystemServiceExit EPT hook removed");
+		ksse_hook_va = 0;
+
+		// Free our shellcode allocation in detour holder
+		if (ksse_shellcode_detour_offset != 0)
+		{
+			void* sc_alloc = kernel_detour_holder::get_allocation_from_offset(ksse_shellcode_detour_offset);
+			kernel_detour_holder::free_memory(sc_alloc);
+			ksse_shellcode_detour_offset = 0;
+		}
+
+		return true;
+	}
+
+	std::println("[-] Failed to remove KiSystemServiceExit EPT hook");
+	return false;
+}
+
+// Main hijack function: installs EPT hook, arms hijack, waits for DllMain completion
+inline bool hijack_thread(std::uint64_t clone_cr3, std::uint64_t target_cr3,
+                          std::uint64_t target_eprocess,
                           std::uint64_t hidden_base_va, std::uint64_t dll_base,
                           DWORD entry_point_rva, std::uint64_t shellcode_page_index)
 {
-	// shellcode VA = hidden_base + shellcode_page * 0x1000
+	// 1. Shellcode + data layout on the last hidden page
 	std::uint64_t shellcode_va = hidden_base_va + (shellcode_page_index * 0x1000);
-	std::uint64_t data_va = shellcode_va + sizeof(g_RemoteCallDllMain);
+	std::uint64_t entry_point_va = dll_base + entry_point_rva;
 
-	// prepare local shellcode buffer
-	SIZE_T shellcode_total = sizeof(g_RemoteCallDllMain) + sizeof(DLLMAIN_STRUCT);
-	std::vector<BYTE> local_shellcode(shellcode_total, 0);
+	// Data struct at offset 0x800 on the shellcode page
+	std::uint64_t data_va = shellcode_va + 0x800;
 
-	memcpy(local_shellcode.data(), g_RemoteCallDllMain, sizeof(g_RemoteCallDllMain));
+	std::println("[+] Shellcode VA: 0x{:X}, Data VA: 0x{:X}", shellcode_va, data_va);
+	std::println("[+] DLL entry point: 0x{:X}", entry_point_va);
 
-	// patch shellcode: data pointer at offset 0x6
-	*(uintptr_t*)(local_shellcode.data() + g_ShellDataOffset) = data_va;
+	// 2. Build CPUID hypercall value for retrieve_original_rip (reserved_data=10)
+	hypercall_info_t retrieve_call = {};
+	retrieve_call.primary_key = hypercall_primary_key;
+	retrieve_call.secondary_key = hypercall_secondary_key;
+	retrieve_call.call_type = hypercall_type_t::read_guest_cr3;
+	retrieve_call.call_reserved_data = 10;
+	std::uint32_t retrieve_rip_call_value = static_cast<std::uint32_t>(retrieve_call.value);
 
-	// fill DLLMAIN_STRUCT
-	auto main_struct = (PDLLMAIN_STRUCT)(local_shellcode.data() + sizeof(g_RemoteCallDllMain));
-	main_struct->Status = 0;
-	main_struct->DllBase = (HINSTANCE)dll_base;
-	main_struct->FnDllMain = dll_base + entry_point_rva;
+	// 3. Build usermode DllMain shellcode (retrieves original_rip via CPUID)
+	auto shellcode = build_dllmain_shellcode(dll_base, entry_point_va, data_va, retrieve_rip_call_value);
+	std::println("[+] DllMain shellcode: {} bytes", shellcode.size());
 
-	// write shellcode + struct to hidden memory
-	std::uint64_t bytes_written = hypercall::write_guest_virtual_memory(
-		local_shellcode.data(), shellcode_va, clone_cr3, shellcode_total);
+	// 4. Prepare HIJACK_DATA
+	HIJACK_DATA hijack_data = {};
+	hijack_data.Status = 0;
+	hijack_data.FnDllMain = (uintptr_t)entry_point_va;
+	hijack_data.DllBase = (HINSTANCE)dll_base;
 
-	if (bytes_written != shellcode_total)
+	// 5. Write shellcode + data to hidden memory (via clone CR3)
+	std::uint64_t written = hypercall::write_guest_virtual_memory(
+		shellcode.data(), shellcode_va, clone_cr3, shellcode.size());
+
+	if (written != shellcode.size())
 	{
-		std::println("[-] Failed to write shellcode to hidden memory");
+		std::println("[-] Failed to write shellcode ({} / {} bytes)", written, shellcode.size());
 		return false;
 	}
 
-	std::println("[+] Shellcode at 0x{:X}, data at 0x{:X}", shellcode_va, data_va);
+	written = hypercall::write_guest_virtual_memory(
+		&hijack_data, data_va, clone_cr3, sizeof(hijack_data));
 
-	// read EPROCESS.Peb
-	std::uint64_t peb_addr = 0;
-	hypercall::read_guest_virtual_memory(&peb_addr,
-		target_eprocess + sys::offsets::eprocess_peb,
-		sys::current_cr3, 8);
-
-	if (peb_addr == 0)
+	if (written != sizeof(hijack_data))
 	{
-		std::println("[-] Failed to read PEB address from EPROCESS");
+		std::println("[-] Failed to write HIJACK_DATA");
 		return false;
 	}
 
-	std::println("[+] PEB: 0x{:X}", peb_addr);
+	// Verify shellcode was written
+	uint8_t verify[4] = {};
+	hypercall::read_guest_virtual_memory(verify, shellcode_va, clone_cr3, 4);
+	std::println("[+] Shellcode verify: {:02X} {:02X} {:02X} {:02X} (expected 9C 50 51 52)",
+		verify[0], verify[1], verify[2], verify[3]);
 
-	// read PEB.KernelCallbackTable (using target's CR3 since PEB is in target's userspace)
-	std::uint64_t kct_addr = 0;
-	hypercall::read_guest_virtual_memory(&kct_addr,
-		peb_addr + sys::offsets::peb_kernel_callback_table,
-		clone_cr3, 8);
-
-	if (kct_addr == 0)
+	// 6. Install EPT hook on KiSystemServiceExit (no hidden memory params needed)
+	if (!install_syscall_exit_hook(target_eprocess))
 	{
-		std::println("[-] Failed to read KernelCallbackTable from PEB");
+		std::println("[-] Failed to install syscall exit EPT hook");
 		return false;
 	}
 
-	std::println("[+] KernelCallbackTable: 0x{:X}", kct_addr);
+	// 7. Arm the hijack (hypervisor-only — no hidden memory write needed)
+	hypercall::arm_syscall_hijack(shellcode_va);
+	std::println("[+] Syscall hijack armed with shellcode VA 0x{:X}", shellcode_va);
 
-	// dump first 4 KCT entries to check which index is __fnCOPYDATA
-	std::uint64_t kct_entries[4] = {};
-	hypercall::read_guest_virtual_memory(kct_entries, kct_addr, clone_cr3, sizeof(kct_entries));
-	std::println("[+] KCT[0]: 0x{:X}", kct_entries[0]);
-	std::println("[+] KCT[1]: 0x{:X}", kct_entries[1]);
-	std::println("[+] KCT[2]: 0x{:X}", kct_entries[2]);
-	std::println("[+] KCT[3]: 0x{:X}", kct_entries[3]);
+	// 8. Print stats
+	std::println("[+] CR3 stats: exits={} swaps={} mmaf_hits={}",
+		hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(),
+		hypercall::read_mmaf_hit_count());
 
-	// read original __fnCOPYDATA (first entry in KCT)
-	std::uint64_t original_fn_copydata = kct_entries[0];
+	std::println("[+] Waiting for DllMain (target process will trigger on next syscall return)...");
 
-	std::println("[+] Original __fnCOPYDATA (KCT[0]): 0x{:X}", original_fn_copydata);
-
-	// patch __fnCOPYDATA → our shellcode VA
-	hypercall::write_guest_virtual_memory(
-		&shellcode_va, kct_addr, clone_cr3, 8);
-
-	// verify KCT patch by reading back
-	std::uint64_t kct_verify = 0;
-	hypercall::read_guest_virtual_memory(&kct_verify, kct_addr, clone_cr3, 8);
-	std::println("[+] KCT patched: __fnCOPYDATA = 0x{:X} (expected 0x{:X}) {}",
-		kct_verify, shellcode_va, kct_verify == shellcode_va ? "OK" : "MISMATCH!");
-
-	// verify shellcode is readable from hidden memory
-	BYTE shellcode_verify[4] = {};
-	hypercall::read_guest_virtual_memory(shellcode_verify, shellcode_va, clone_cr3, 4);
-	std::println("[+] Shellcode verify: first 4 bytes = {:02X} {:02X} {:02X} {:02X} (expected 48 83 EC 38)",
-		shellcode_verify[0], shellcode_verify[1], shellcode_verify[2], shellcode_verify[3]);
-
-	// find target window and trigger
-	HWND hwnd = find_target_window(static_cast<DWORD>(target_pid));
-	std::println("[+] Target HWND: 0x{:X}", (std::uint64_t)hwnd);
-
-	if (hwnd)
-	{
-		COPYDATASTRUCT cds = {};
-		WCHAR msg[] = L"X";
-		cds.dwData = 1;
-		cds.cbData = sizeof(msg);
-		cds.lpData = msg;
-
-		// enable enforce: force clone CR3 at every VM exit during callback
-		hypercall::enable_cr3_enforce();
-		std::println("[+] CR3 enforce enabled");
-
-		LRESULT send_result = SendMessageW(hwnd, WM_COPYDATA, (WPARAM)hwnd, (LPARAM)&cds);
-		std::println("[+] SendMessageW returned: {}", (long long)send_result);
-
-		// immediate status check (before disabling enforce)
-		DLLMAIN_STRUCT immediate_status = {};
-		hypercall::read_guest_virtual_memory(&immediate_status, data_va, clone_cr3, sizeof(DLLMAIN_STRUCT));
-		std::println("[+] Immediate status after SendMessage: Status={}", immediate_status.Status);
-
-		// disable enforce
-		hypercall::disable_cr3_enforce();
-		std::println("[+] CR3 enforce disabled");
-
-		// CR3 stats after trigger
-		std::println("[+] CR3 stats after trigger: exits={} swaps={} last_seen=0x{:X}",
-			hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(), hypercall::read_cr3_last_seen());
-	}
-	else
-	{
-		std::println("[-] No visible window found for PID {}", target_pid);
-		// restore KCT before returning
-		hypercall::write_guest_virtual_memory(
-			&original_fn_copydata, kct_addr, clone_cr3, 8);
-		return false;
-	}
-
-	// poll for completion
-	DLLMAIN_STRUCT remote_status = {};
-	for (int attempt = 0; attempt < 50; attempt++)
+	// 9. Poll for completion
+	HIJACK_DATA remote_status = {};
+	bool saw_status_1 = false;
+	for (int attempt = 0; attempt < 100; attempt++)
 	{
 		Sleep(100);
-		hypercall::read_guest_virtual_memory(&remote_status, data_va, clone_cr3, sizeof(DLLMAIN_STRUCT));
+		hypercall::read_guest_virtual_memory(&remote_status, data_va, clone_cr3, sizeof(remote_status));
+
+		if (remote_status.Status == 1 && !saw_status_1)
+		{
+			saw_status_1 = true;
+			std::println("[+] CANARY HIT: Status=1 — shellcode is executing! (attempt {})", attempt);
+		}
 
 		if (remote_status.Status == 2)
 		{
-			std::println("[+] DllMain executed successfully (Status=2)");
+			std::println("[+] DllMain executed successfully! (Status=2, attempt {})", attempt);
 			break;
+		}
+
+		if (attempt % 10 == 9)
+		{
+			std::println("[*] Still waiting... Status={}, mmaf_hits={}, swaps={}, exits={}",
+				remote_status.Status, hypercall::read_mmaf_hit_count(),
+				hypercall::read_cr3_swap_count(), hypercall::read_cr3_exit_count());
 		}
 	}
 
+	// 10. Cleanup: remove syscall exit hook, disarm
+	remove_syscall_exit_hook();
+	hypercall::disarm_syscall_hijack();
+
 	if (remote_status.Status != 2)
 	{
-		std::println("[!] DllMain may not have executed (Status={})", remote_status.Status);
+		std::println("[!] DllMain did not complete (Status={})", remote_status.Status);
+		if (saw_status_1)
+			std::println("[!] Status=1 was seen — shellcode ran, DllMain CRASHED");
+		else
+			std::println("[!] Status stayed 0 — EPT hook may not have fired");
+
+		std::println("[+] Final CR3 stats: exits={} swaps={} mmaf_hits={}",
+			hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(),
+			hypercall::read_mmaf_hit_count());
 	}
-
-	// restore original __fnCOPYDATA
-	hypercall::write_guest_virtual_memory(
-		&original_fn_copydata, kct_addr, clone_cr3, 8);
-
-	std::println("[+] KCT restored");
 
 	return remote_status.Status == 2;
 }
@@ -381,6 +672,84 @@ inline bool call_dll_main(std::uint64_t clone_cr3, std::uint64_t target_cr3,
 //=============================================================================
 
 inline std::uint64_t mmaf_hook_va = 0; // stored for removal
+inline std::uint16_t mmaf_shellcode_detour_offset = 0; // detour holder allocation
+
+// Build MmAccessFault check shellcode (runs in detour holder, NOT as extra_assembled_bytes)
+// This is the trampoline approach: only 14 bytes on the shadow page, full shellcode in
+// the detour holder. Reduces displacement from ~50 to ~28 bytes of original MmAccessFault
+// prologue, avoiding RIP-relative fixup issues in deeper prologue instructions.
+//
+// Flow when called via trampoline:
+//   Stack: [caller_return_addr | shadow_space...]  (trampoline push+ret preserves stack)
+//   Hidden path: CPUID swap → return STATUS_SUCCESS to caller
+//   Not-hidden path: jmp back to mmaf_va+14 → jmp_to_detour → displaced original bytes
+inline std::vector<std::uint8_t> build_mmaf_shellcode(
+	std::uint64_t mmaf_va,
+	std::uint32_t hypercall_value,
+	std::uint64_t clone_cr3,
+	std::uint64_t hidden_pml4_index)
+{
+	std::vector<std::uint8_t> sc;
+	sc.reserve(80);
+
+	auto push_u8 = [&](uint8_t b) { sc.push_back(b); };
+	auto push_u32 = [&](uint32_t v) {
+		for (int i = 0; i < 4; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+	auto push_u64 = [&](uint64_t v) {
+		for (int i = 0; i < 8; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+
+	// push rax
+	push_u8(0x50);
+	// push rbx (CPUID clobbers EBX)
+	push_u8(0x53);
+	// mov rax, rdx  — RDX = faulting virtual address (MmAccessFault param 2)
+	push_u8(0x48); push_u8(0x8B); push_u8(0xC2);
+	// shr rax, 39  — extract PML4 index
+	push_u8(0x48); push_u8(0xC1); push_u8(0xE8); push_u8(0x27);
+	// and eax, 0x1FF  — mask to 9 bits
+	push_u8(0x25); push_u8(0xFF); push_u8(0x01); push_u8(0x00); push_u8(0x00);
+	// cmp eax, <pml4_index>
+	push_u8(0x83); push_u8(0xF8); push_u8(static_cast<uint8_t>(hidden_pml4_index));
+	// jne .not_hidden
+	push_u8(0x75);
+	const std::size_t jne_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// --- hidden path: CPUID swap + return STATUS_SUCCESS ---
+	const std::size_t hidden_start = sc.size();
+
+	// mov ecx, <hypercall_value>
+	push_u8(0xB9); push_u32(hypercall_value);
+	// movabs rdx, <clone_cr3>
+	push_u8(0x48); push_u8(0xBA); push_u64(clone_cr3);
+	// cpuid — VMEXIT: writes clone_cr3 to guest CR3
+	push_u8(0x0F); push_u8(0xA2);
+	// pop rbx
+	push_u8(0x5B);
+	// pop rax
+	push_u8(0x58);
+	// xor eax, eax  — STATUS_SUCCESS
+	push_u8(0x33); push_u8(0xC0);
+	// ret  — return to MmAccessFault's caller
+	push_u8(0xC3);
+
+	// patch jne offset
+	sc[jne_pos] = static_cast<uint8_t>(sc.size() - hidden_start);
+
+	// --- .not_hidden: restore regs, jmp back to mmaf_va+14 ---
+	// pop rbx
+	push_u8(0x5B);
+	// pop rax
+	push_u8(0x58);
+
+	// 14-byte absolute jmp back to mmaf_va + 14 (past the trampoline, hits jmp_to_detour)
+	auto return_jmp = build_abs_jmp(mmaf_va + 14);
+	sc.insert(sc.end(), return_jmp.begin(), return_jmp.end());
+
+	return sc;
+}
 
 inline bool install_mmaf_hook(std::uint64_t clone_cr3, std::uint64_t hidden_pml4_index = 70)
 {
@@ -411,84 +780,39 @@ inline bool install_mmaf_hook(std::uint64_t clone_cr3, std::uint64_t hidden_pml4
 
 	std::uint32_t hypercall_value = static_cast<std::uint32_t>(call_info.value);
 
-	// build extra_assembled_bytes for the MmAccessFault EPT hook
-	// MmAccessFault(ULONG FaultCode /*RCX*/, PVOID Address /*RDX*/, ...)
-	//
-	// Logic:
-	//   if ((RDX >> 39) & 0x1FF) == hidden_pml4_index:
-	//       write_guest_cr3(clone_cr3) via CPUID hypercall
-	//       return STATUS_SUCCESS (0)
-	//   else:
-	//       fall through to original MmAccessFault
-	//
-	// Shellcode:
-	//   push rax                          ; 50
-	//   mov rax, rdx                      ; 48 8B C2
-	//   shr rax, 39                       ; 48 C1 E8 27
-	//   and eax, 0x1FF                    ; 25 FF 01 00 00
-	//   cmp eax, <pml4_index>             ; 83 F8 XX
-	//   jne .not_hidden (+23)             ; 75 17
-	//   push rbx                          ; 53
-	//   mov ecx, <hypercall_info_32>      ; B9 XX XX XX XX
-	//   movabs rdx, <clone_cr3_64>        ; 48 BA XX XX XX XX XX XX XX XX
-	//   cpuid                             ; 0F A2
-	//   pop rbx                           ; 5B
-	//   pop rax                           ; 58
-	//   xor eax, eax                      ; 33 C0
-	//   ret                               ; C3
-	// .not_hidden:
-	//   pop rax                           ; 58
+	// 1. Build full MmAccessFault check shellcode (runs in detour holder)
+	auto full_shellcode = build_mmaf_shellcode(mmaf_va, hypercall_value, clone_cr3, hidden_pml4_index);
 
-	std::vector<std::uint8_t> shellcode;
-	shellcode.reserve(42);
+	std::println("[+] MmAccessFault shellcode: {} bytes (with return jmp), clone_cr3=0x{:X}",
+		full_shellcode.size(), clone_cr3);
 
-	// push rax
-	shellcode.push_back(0x50);
-	// mov rax, rdx
-	shellcode.push_back(0x48); shellcode.push_back(0x8B); shellcode.push_back(0xC2);
-	// shr rax, 39
-	shellcode.push_back(0x48); shellcode.push_back(0xC1); shellcode.push_back(0xE8); shellcode.push_back(0x27);
-	// and eax, 0x1FF
-	shellcode.push_back(0x25); shellcode.push_back(0xFF); shellcode.push_back(0x01); shellcode.push_back(0x00); shellcode.push_back(0x00);
-	// cmp eax, <pml4_index>
-	shellcode.push_back(0x83); shellcode.push_back(0xF8); shellcode.push_back(static_cast<std::uint8_t>(hidden_pml4_index));
-	// jne +23 (.not_hidden)
-	shellcode.push_back(0x75); shellcode.push_back(0x17);
+	// 2. Allocate space in detour holder for our shellcode
+	void* sc_buffer = kernel_detour_holder::allocate_memory(
+		static_cast<std::uint16_t>(full_shellcode.size()));
 
-	// --- hidden path (23 bytes) ---
-	// push rbx
-	shellcode.push_back(0x53);
-	// mov ecx, <hypercall_value>
-	shellcode.push_back(0xB9);
-	shellcode.push_back(static_cast<std::uint8_t>(hypercall_value >>  0));
-	shellcode.push_back(static_cast<std::uint8_t>(hypercall_value >>  8));
-	shellcode.push_back(static_cast<std::uint8_t>(hypercall_value >> 16));
-	shellcode.push_back(static_cast<std::uint8_t>(hypercall_value >> 24));
-	// movabs rdx, <clone_cr3>
-	shellcode.push_back(0x48); shellcode.push_back(0xBA);
-	for (int i = 0; i < 8; i++)
-		shellcode.push_back(static_cast<std::uint8_t>(clone_cr3 >> (i * 8)));
-	// cpuid
-	shellcode.push_back(0x0F); shellcode.push_back(0xA2);
-	// pop rbx
-	shellcode.push_back(0x5B);
-	// pop rax
-	shellcode.push_back(0x58);
-	// xor eax, eax
-	shellcode.push_back(0x33); shellcode.push_back(0xC0);
-	// ret
-	shellcode.push_back(0xC3);
+	if (sc_buffer == nullptr)
+	{
+		std::println("[-] Failed to allocate detour holder space for MmAccessFault shellcode");
+		return false;
+	}
 
-	// --- .not_hidden ---
-	// pop rax
-	shellcode.push_back(0x58);
+	mmaf_shellcode_detour_offset = kernel_detour_holder::get_allocation_offset(sc_buffer);
+	memcpy(sc_buffer, full_shellcode.data(), full_shellcode.size());
 
-	std::println("[+] MmAccessFault hook shellcode: {} bytes, clone_cr3=0x{:X}, hypercall=0x{:08X}",
-		shellcode.size(), clone_cr3, hypercall_value);
+	std::uint64_t sc_kernel_va = hook::kernel_detour_holder_base + mmaf_shellcode_detour_offset;
 
+	std::println("[+] MmAccessFault shellcode in detour holder at offset 0x{:X} (kernel VA: 0x{:X})",
+		mmaf_shellcode_detour_offset, sc_kernel_va);
+
+	// 3. Build trampoline: 14-byte jmp to our shellcode in detour holder
+	auto trampoline = build_abs_jmp(sc_kernel_va);
+
+	std::println("[+] Trampoline: {} bytes (only ~28 bytes of MmAccessFault prologue displaced)", trampoline.size());
+
+	// 4. Install EPT hook with minimal displacement
 	std::vector<std::uint8_t> post_original_bytes; // empty
 
-	std::uint8_t status = hook::add_kernel_hook(mmaf_va, shellcode, post_original_bytes);
+	std::uint8_t status = hook::add_kernel_hook(mmaf_va, trampoline, post_original_bytes);
 
 	if (status == 1)
 	{
@@ -497,6 +821,9 @@ inline bool install_mmaf_hook(std::uint64_t clone_cr3, std::uint64_t hidden_pml4
 		return true;
 	}
 
+	// Cleanup on failure
+	kernel_detour_holder::free_memory(sc_buffer);
+	mmaf_shellcode_detour_offset = 0;
 	std::println("[-] Failed to install MmAccessFault EPT hook");
 	return false;
 }
@@ -515,6 +842,15 @@ inline bool remove_mmaf_hook()
 	{
 		std::println("[+] MmAccessFault EPT hook removed");
 		mmaf_hook_va = 0;
+
+		// Free our shellcode allocation in detour holder
+		if (mmaf_shellcode_detour_offset != 0)
+		{
+			void* sc_alloc = kernel_detour_holder::get_allocation_from_offset(mmaf_shellcode_detour_offset);
+			kernel_detour_holder::free_memory(sc_alloc);
+			mmaf_shellcode_detour_offset = 0;
+		}
+
 		return true;
 	}
 
@@ -611,6 +947,29 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 
 	std::println("[+] Mapped {} hidden pages", total_pages);
 
+	// 6b. Register UserDirectoryTableBase for CR3 write interception (KPTI fix)
+	// KPTI: kernel exit writes UserDTB to CR3. Without intercepting this,
+	// the CR3 swap to clone is undone. Now the hypervisor intercepts both PFNs.
+	constexpr std::uint64_t kprocess_user_dtb_offset = 0x280; // KPROCESS.UserDirectoryTableBase
+	std::uint64_t user_dtb = 0;
+	hypercall::read_guest_virtual_memory(&user_dtb,
+		process->eprocess + kprocess_user_dtb_offset,
+		sys::current_cr3, 8);
+
+	if (user_dtb != 0)
+	{
+		std::println("[+] UserDirectoryTableBase: 0x{:X}", user_dtb);
+		std::uint64_t result = hypercall::set_user_cr3(user_dtb);
+		if (result)
+			std::println("[+] Registered UserDTB PFN for CR3 interception");
+		else
+			std::println("[!] WARNING: Failed to register UserDTB");
+	}
+	else
+	{
+		std::println("[!] WARNING: UserDirectoryTableBase is 0 (KPTI disabled or wrong offset)");
+	}
+
 	// 7. Relocate image
 	if (!relocate_image((PVOID)hidden_base_va, dll_image.data(), nt_headers))
 	{
@@ -666,14 +1025,48 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 			text_verify[4], text_verify[5], text_verify[6], text_verify[7]);
 	}
 
-	// 11. Print CR3 stats before trigger
-	std::println("[+] CR3 stats before trigger: exits={} swaps={} last_seen=0x{:X}",
-		hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(), hypercall::read_cr3_last_seen());
+	// 11. Install MmAccessFault EPT hook (catches #PF on hidden memory, swaps CR3)
+	if (!install_mmaf_hook(cloned_cr3, hidden_pml4_index))
+	{
+		std::println("[!] WARNING: MmAccessFault hook failed, injection may not work");
+	}
+	else
+	{
+		// verify hook is in the list
+		std::println("[+] MmAccessFault hook in kernel_hook_list: {}",
+			hook::kernel_hook_list.contains(mmaf_hook_va) ? "YES" : "NO");
 
-	// 12. Call DllMain via KCT hijack
-	bool dllmain_result = call_dll_main(
-		cloned_cr3, process->cr3, process->eprocess, process->pid,
+		// verify shadow page content directly (our process memory, no EPT involved)
+		// NOTE: read_guest_virtual_memory returns zeros for hooked pages because EPT has read=0
+		// in hyperv_cr3. This is EXPECTED. Instead, read the shadow page directly.
+		if (hook::kernel_hook_list.contains(mmaf_hook_va))
+		{
+			auto& hook_info = hook::kernel_hook_list[mmaf_hook_va];
+			std::uint8_t* shadow = static_cast<std::uint8_t*>(hook_info.get_mapped_shadow_page());
+			std::uint64_t page_offset = mmaf_hook_va & 0xFFF;
+			std::uint64_t orig_pfn = hook_info.original_page_pfn;
+			std::println("[+] Shadow page offset: 0x{:X}, original_pfn: 0x{:X}",
+				page_offset, orig_pfn);
+			std::println("[+] Shadow page content (trampoline): {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+				shadow[page_offset+0], shadow[page_offset+1], shadow[page_offset+2], shadow[page_offset+3],
+				shadow[page_offset+4], shadow[page_offset+5], shadow[page_offset+6], shadow[page_offset+7],
+				shadow[page_offset+8], shadow[page_offset+9], shadow[page_offset+10], shadow[page_offset+11],
+				shadow[page_offset+12], shadow[page_offset+13]);
+			std::println("[+] (should be: 68 xx xx xx xx C7 44 24 04 xx xx xx xx C3 = abs jmp to detour holder)");
+		}
+	}
+
+	// 12. Print stats before trigger
+	std::println("[+] CR3 stats before trigger: exits={} swaps={} mmaf_hits={}",
+		hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(), hypercall::read_mmaf_hit_count());
+
+	// 13. Call DllMain via syscall hijack (trap frame RIP overwrite)
+	bool dllmain_result = hijack_thread(
+		cloned_cr3, process->cr3, process->eprocess,
 		hidden_base_va, hidden_base_va, entry_point_rva, shellcode_page);
+
+	// Print mmaf hit count after trigger
+	std::println("[+] mmaf_hit_count after trigger: {}", hypercall::read_mmaf_hit_count());
 
 	if (dllmain_result)
 	{
@@ -682,11 +1075,77 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	else
 	{
 		std::println("[-] DllMain execution failed or timed out");
-		std::println("[*] Disabling CR3 intercept to avoid overhead...");
+	}
+
+	// DLL is persistent (runs threads, hooks PresentThread) — keep infrastructure active:
+	//   - CR3 intercept: swaps to clone on MOV CR3 (context switch)
+	//   - MmAccessFault hook: swaps to clone on PML4[70] page fault
+	//   - UserDTB interception: handles KPTI user/kernel DTB swap
+	// Only the KiSSE hook was removed inside hijack_thread() after DllMain returned.
+	if (!dllmain_result)
+	{
+		// DllMain failed — tear down everything
+		if (user_dtb != 0)
+		{
+			hypercall::clear_user_cr3();
+			std::println("[*] UserDTB interception cleared");
+		}
+		std::println("[*] Removing MmAccessFault hook...");
+		remove_mmaf_hook();
+		std::println("[*] Disabling CR3 intercept...");
 		hypercall::disable_cr3_intercept();
+	}
+	else
+	{
+		std::println("[+] DLL persistent — CR3 intercept + MmAccessFault hook remain active");
 	}
 
 	return dllmain_result;
+}
+
+//=============================================================================
+// Uninject: tear down all hooks and restore clean state
+//=============================================================================
+
+inline void uninject()
+{
+	std::println("[*] Tearing down injection infrastructure...");
+
+	// 1. Disarm any pending syscall hijack
+	hypercall::disarm_syscall_hijack();
+
+	// 2. Remove KiSystemServiceExit hook (if still active)
+	if (ksse_hook_va != 0)
+	{
+		remove_syscall_exit_hook();
+		std::println("[+] KiSystemServiceExit hook removed");
+	}
+
+	// 3. Remove MmAccessFault hook
+	if (mmaf_hook_va != 0)
+	{
+		remove_mmaf_hook();
+		std::println("[+] MmAccessFault hook removed");
+	}
+	else
+	{
+		std::println("[*] MmAccessFault hook not active");
+	}
+
+	// 4. Clear UserDTB interception
+	hypercall::clear_user_cr3();
+	std::println("[+] UserDTB interception cleared");
+
+	// 5. Disable CR3 intercept (also resets enforce_active)
+	hypercall::disable_cr3_intercept();
+	std::println("[+] CR3 intercept disabled");
+
+	// 6. Print final stats
+	std::println("[+] Final stats: exits={} swaps={} mmaf_hits={}",
+		hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(),
+		hypercall::read_mmaf_hit_count());
+
+	std::println("[+] Clean state restored — safe to reinject or exit");
 }
 
 } // namespace inject

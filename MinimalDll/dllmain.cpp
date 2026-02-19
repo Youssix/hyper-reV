@@ -1,10 +1,8 @@
-// Minimal DLL - NO CRT, NO imports
-// Entry point directly returns TRUE
-// Used to validate injection mechanism independently of DLL complexity
+// Minimal DLL for injection validation
+// Raw entry point - no CRT initialization
 
 #include <windows.h>
 
-// Raw entry point - no CRT initialization
 BOOL WINAPI _DllMainCRTStartup(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     (void)hinstDLL;
@@ -12,8 +10,19 @@ BOOL WINAPI _DllMainCRTStartup(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvRe
 
     if (fdwReason == DLL_PROCESS_ATTACH)
     {
-        // Do absolutely nothing - just return TRUE
-        // If Status=2 after injection, the mechanism works
+        // 1. File proof (zero UI dependency)
+        HANDLE h = CreateFileA("C:\\injected.txt", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            WriteFile(h, "pwned\r\n", 7, NULL, NULL);
+            CloseHandle(h);
+        }
+
+        // 2. DebugView proof (kernel32 only, open DebugView to see)
+        OutputDebugStringA("[PhysInj] DLL injected successfully!\n");
+
+        // 3. MessageBox (needs user32 + GUI thread)
+        MessageBoxA(NULL, "DLL Injected!", "PhysInj", MB_OK | MB_ICONINFORMATION);
     }
 
     return TRUE;

@@ -126,6 +126,16 @@ std::uint64_t hypercall::map_hidden_page(std::uint64_t page_index)
 	return make_hypercall(hypercall_type_t::clone_guest_cr3, 2, page_index, 0, 0);
 }
 
+std::uint64_t hypercall::set_user_cr3(std::uint64_t user_cr3)
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 3, user_cr3, 0, 0);
+}
+
+std::uint64_t hypercall::clear_user_cr3()
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 4, 0, 0, 0);
+}
+
 std::uint64_t hypercall::enable_cr3_intercept(std::uint64_t target_cr3, std::uint64_t cloned_cr3)
 {
 	hypercall_type_t call_type = hypercall_type_t::enable_cr3_intercept;
@@ -148,6 +158,21 @@ std::uint64_t hypercall::enable_cr3_enforce()
 std::uint64_t hypercall::disable_cr3_enforce()
 {
 	return make_hypercall(hypercall_type_t::read_guest_cr3, 5, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_mmaf_hit_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 6, 0, 0, 0);
+}
+
+std::uint64_t hypercall::arm_syscall_hijack(std::uint64_t shellcode_va)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 8, shellcode_va, 0, 0);
+}
+
+std::uint64_t hypercall::disarm_syscall_hijack()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 9, 0, 0, 0);
 }
 
 std::uint64_t hypercall::add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address)

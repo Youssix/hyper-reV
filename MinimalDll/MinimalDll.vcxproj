@@ -40,7 +40,7 @@
       <NoEntryPoint>false</NoEntryPoint>
       <EntryPointSymbol>_DllMainCRTStartup</EntryPointSymbol>
       <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
-      <AdditionalDependencies></AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
