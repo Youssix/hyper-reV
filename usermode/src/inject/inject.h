@@ -890,6 +890,374 @@ inline bool remove_mmaf_hook()
 }
 
 //=============================================================================
+// KiSystemCall64 Service Exit Hook — Instrumentation Callback Bypass
+// Hooks "mov r10, [rbp+0xE8]" in the InstrumentationCallback check path
+// of KiSystemCall64. When the sysret address at [rbp+0xE8] is in our
+// hidden memory (PML4[70]), we set RAX = [rbp+0xE8] so that the next
+// instruction "mov [rbp+0xE8], rax" writes back the ORIGINAL return
+// address instead of the InstrumentationCallback pointer.
+// Result: syscall returns directly to our code, callback is never invoked.
+//=============================================================================
+
+inline std::uint64_t ki_sc64se_hook_va = 0;
+inline std::uint16_t ki_sc64se_shellcode_detour_offset = 0;
+inline std::uint64_t ki_sc64se_target_eprocess = 0; // stored for CLI re-install
+
+// Build the instrumentation callback bypass shellcode (runs in ring 0)
+//
+// Two-stage filter (iso ring-1.io):
+//   1. EPROCESS check  — early-out for non-target processes (cheap, avoids PML4 math)
+//   2. PML4 index check — only bypass callback for syscalls from hidden memory
+//
+// IMPORTANT: This shellcode includes the two displaced original instructions
+// (mov r10, [rbp+disp] + mov [rbp+disp], rax) and returns to hook_va + 14,
+// which is ORIGINAL code on the shadow page. This is necessary because external
+// branches (jz/jne from InstrumentationCallback NULL check) jump to hook_va + 14.
+// Using add_kernel_hook would put jmp_to_detour at offset 14 (28 bytes modified),
+// and those branches would incorrectly execute the displaced mov instructions
+// (writing RAX=0 to TrapFrame.Rip → BSOD).
+//
+// Flow:
+//   if (KTHREAD.Process != target_eprocess) goto skip;  // not our process
+//   if (PML4_INDEX([rbp+disp]) != hidden_pml4_index) goto skip;  // not hidden memory
+//   RAX = [rbp+disp]   // bypass: overwrite callback ptr with original return addr
+//   skip:
+//   mov r10, [rbp+disp]    // displaced original
+//   mov [rbp+disp], rax    // displaced original
+//   jmp hook_va + 14       // back to original code (where jz/jne also land)
+//
+inline std::vector<uint8_t> build_ki_syscall64_service_exit_hook(
+	std::uint64_t hook_va,
+	std::int32_t frame_disp,
+	std::uint8_t hidden_pml4_index,
+	std::uint64_t target_eprocess,
+	std::uint32_t kthread_process_offset)
+{
+	std::vector<uint8_t> sc;
+	sc.reserve(120);
+
+	auto push_u8 = [&](uint8_t b) { sc.push_back(b); };
+	auto push_i32 = [&](int32_t v) {
+		for (int i = 0; i < 4; i++) sc.push_back(static_cast<uint8_t>(static_cast<uint32_t>(v) >> (i * 8)));
+	};
+	auto push_u32 = [&](uint32_t v) {
+		for (int i = 0; i < 4; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+	auto push_u64 = [&](uint64_t v) {
+		for (int i = 0; i < 8; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+
+	// pushfq  — save RFLAGS (cmp modifies flags)
+	push_u8(0x9C);
+
+	// push rcx
+	push_u8(0x51);
+
+	// push rdx  — needed for EPROCESS comparison
+	push_u8(0x52);
+
+	// === Stage 1: EPROCESS check (early-out for non-target processes) ===
+
+	// mov rcx, gs:[0x188]  — KPCR.CurrentThread
+	push_u8(0x65); push_u8(0x48); push_u8(0x8B); push_u8(0x0C); push_u8(0x25);
+	push_u8(0x88); push_u8(0x01); push_u8(0x00); push_u8(0x00);
+
+	// mov rcx, [rcx + kthread_process_offset]  — KTHREAD.Process → EPROCESS
+	push_u8(0x48); push_u8(0x8B); push_u8(0x89);
+	push_u32(kthread_process_offset);
+
+	// movabs rdx, <target_eprocess>
+	push_u8(0x48); push_u8(0xBA);
+	push_u64(target_eprocess);
+
+	// cmp rcx, rdx
+	push_u8(0x48); push_u8(0x3B); push_u8(0xCA);
+
+	// jne .skip  — not our process, skip everything
+	push_u8(0x75);
+	const std::size_t jne_eprocess_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// === Stage 2: PML4 index check (our process confirmed) ===
+
+	// mov rcx, [rbp + frame_disp]  — load sysret return address
+	push_u8(0x48); push_u8(0x8B); push_u8(0x8D);
+	push_i32(frame_disp);
+
+	// shr rcx, 39  — extract PML4 index (bits 47:39)
+	push_u8(0x48); push_u8(0xC1); push_u8(0xE9); push_u8(0x27);
+
+	// and ecx, 0x1FF  — mask to 9 bits
+	push_u8(0x81); push_u8(0xE1); push_u8(0xFF); push_u8(0x01); push_u8(0x00); push_u8(0x00);
+
+	// cmp ecx, <hidden_pml4_index>
+	push_u8(0x83); push_u8(0xF9); push_u8(hidden_pml4_index);
+
+	// jne .skip  — not from hidden memory
+	push_u8(0x75);
+	const std::size_t jne_pml4_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// === Bypass: set RAX = original return address ===
+
+	// mov rax, [rbp + frame_disp]
+	push_u8(0x48); push_u8(0x8B); push_u8(0x85);
+	push_i32(frame_disp);
+
+	// .skip:
+	const std::size_t skip_pos = sc.size();
+
+	// Patch both jne offsets
+	sc[jne_eprocess_pos] = static_cast<uint8_t>(skip_pos - (jne_eprocess_pos + 1));
+	sc[jne_pml4_pos] = static_cast<uint8_t>(skip_pos - (jne_pml4_pos + 1));
+
+	// pop rdx
+	push_u8(0x5A);
+
+	// pop rcx
+	push_u8(0x59);
+
+	// popfq  — restore RFLAGS
+	push_u8(0x9D);
+
+	// === Displaced original instructions (from hook point) ===
+	// mov r10, [rbp + frame_disp]   ; 4C 8B 95 + i32
+	push_u8(0x4C); push_u8(0x8B); push_u8(0x95);
+	push_i32(frame_disp);
+
+	// mov [rbp + frame_disp], rax   ; 48 89 85 + i32
+	push_u8(0x48); push_u8(0x89); push_u8(0x85);
+	push_i32(frame_disp);
+
+	// 14-byte abs jmp back to hook_va + 14 (original code, where jz/jne also land)
+	auto return_jmp = build_abs_jmp(hook_va + 14);
+	sc.insert(sc.end(), return_jmp.begin(), return_jmp.end());
+
+	return sc;
+}
+
+// Shadow page management integrated with kernel_hook_list for multi-hook per page support.
+// Only 14 bytes modified on the shadow page (trampoline at hook offset).
+// Offset 14+ remains original code, so external jz/jne branches land safely.
+// If another hook already owns a shadow for this page, reuses it (no new EPT registration).
+inline bool install_ki_syscall64_service_exit_hook(std::uint64_t target_eprocess, std::uint64_t hidden_pml4_index = 70)
+{
+	if (sys::offsets::ki_system_call64_service_exit_rva == 0)
+	{
+		std::println("[-] KiSystemCall64 service exit RVA not resolved (pattern not found)");
+		return false;
+	}
+
+	if (!sys::kernel::modules_list.contains("ntoskrnl.exe"))
+	{
+		std::println("[-] ntoskrnl.exe not in modules list");
+		return false;
+	}
+
+	std::uint64_t ntoskrnl_base = sys::kernel::modules_list["ntoskrnl.exe"].base_address;
+	std::uint64_t hook_va = ntoskrnl_base + sys::offsets::ki_system_call64_service_exit_rva;
+
+	std::println("[+] KiSystemCall64 service exit hook VA: 0x{:X}", hook_va);
+
+	// Store EPROCESS for CLI re-install
+	ki_sc64se_target_eprocess = target_eprocess;
+
+	// Build shellcode with EPROCESS + PML4 dual check (includes displaced instructions + return jmp)
+	auto full_shellcode = build_ki_syscall64_service_exit_hook(
+		hook_va,
+		sys::offsets::ki_system_call64_service_exit_disp,
+		static_cast<std::uint8_t>(hidden_pml4_index),
+		target_eprocess,
+		static_cast<std::uint32_t>(sys::offsets::kthread_process));
+
+	std::println("[+] Callback bypass shellcode: {} bytes (frame_disp=0x{:X}, pml4_index={}, eprocess=0x{:X})",
+		full_shellcode.size(), sys::offsets::ki_system_call64_service_exit_disp, hidden_pml4_index, target_eprocess);
+
+	// Allocate shellcode in detour holder
+	void* sc_buffer = kernel_detour_holder::allocate_memory(
+		static_cast<std::uint16_t>(full_shellcode.size()));
+
+	if (sc_buffer == nullptr)
+	{
+		std::println("[-] Failed to allocate detour holder space for callback bypass shellcode");
+		return false;
+	}
+
+	ki_sc64se_shellcode_detour_offset = kernel_detour_holder::get_allocation_offset(sc_buffer);
+	memcpy(sc_buffer, full_shellcode.data(), full_shellcode.size());
+
+	std::uint64_t sc_kernel_va = hook::kernel_detour_holder_base + ki_sc64se_shellcode_detour_offset;
+
+	std::println("[+] Shellcode in detour holder at offset 0x{:X} (kernel VA: 0x{:X})",
+		ki_sc64se_shellcode_detour_offset, sc_kernel_va);
+
+	// === Shadow page setup with same-page detection ===
+
+	std::uint64_t hook_physical = hypercall::translate_guest_virtual_address(hook_va, sys::current_cr3);
+	if (hook_physical == 0)
+	{
+		std::println("[-] Failed to translate hook VA to physical");
+		kernel_detour_holder::free_memory(sc_buffer);
+		ki_sc64se_shellcode_detour_offset = 0;
+		return false;
+	}
+
+	std::uint64_t target_pfn = hook_physical >> 12;
+	hook::kernel_hook_info_t* existing_hook = hook::find_hook_on_same_page(target_pfn);
+
+	void* shadow_page = nullptr;
+	bool is_owner = false;
+
+	if (existing_hook != nullptr)
+	{
+		// Reuse existing shadow page (another hook already owns it)
+		shadow_page = existing_hook->get_mapped_shadow_page();
+		std::println("[+] Reusing existing shadow page from hook on same page (PFN: 0x{:X})", target_pfn);
+	}
+	else
+	{
+		// Allocate new shadow page
+		shadow_page = sys::user::allocate_locked_memory(0x1000, PAGE_READWRITE);
+		if (shadow_page == nullptr)
+		{
+			std::println("[-] Failed to allocate shadow page for callback bypass hook");
+			kernel_detour_holder::free_memory(sc_buffer);
+			ki_sc64se_shellcode_detour_offset = 0;
+			return false;
+		}
+
+		std::uint64_t shadow_physical = hypercall::translate_guest_virtual_address(
+			reinterpret_cast<std::uint64_t>(shadow_page), sys::current_cr3);
+		if (shadow_physical == 0)
+		{
+			std::println("[-] Failed to translate shadow page to physical");
+			sys::user::free_memory(shadow_page);
+			kernel_detour_holder::free_memory(sc_buffer);
+			ki_sc64se_shellcode_detour_offset = 0;
+			return false;
+		}
+
+		// Copy original kernel page to shadow
+		std::uint64_t page_base_va = hook_va & ~0xFFFull;
+		hypercall::read_guest_virtual_memory(
+			static_cast<std::uint8_t*>(shadow_page), page_base_va, sys::current_cr3, 0x1000);
+
+		// Register EPT hook
+		std::uint64_t hook_status = hypercall::add_slat_code_hook(hook_physical, shadow_physical);
+		if (hook_status == 0)
+		{
+			std::println("[-] Failed to register EPT hook for callback bypass");
+			sys::user::free_memory(shadow_page);
+			kernel_detour_holder::free_memory(sc_buffer);
+			ki_sc64se_shellcode_detour_offset = 0;
+			return false;
+		}
+
+		is_owner = true;
+	}
+
+	// Save original shadow bytes before writing trampoline
+	std::uint64_t page_offset = hook_va & 0xFFF;
+
+	hook::saved_shadow_bytes[hook_va] = std::vector<std::uint8_t>(
+		static_cast<std::uint8_t*>(shadow_page) + page_offset,
+		static_cast<std::uint8_t*>(shadow_page) + page_offset + 14);
+
+	// Write ONLY 14-byte trampoline at hook offset (rest stays original)
+	auto trampoline = build_abs_jmp(sc_kernel_va);
+	memcpy(static_cast<std::uint8_t*>(shadow_page) + page_offset, trampoline.data(), 14);
+
+	std::println("[+] Shadow page: 14-byte trampoline at offset 0x{:X}, original code preserved at offset 0x{:X}+",
+		page_offset, page_offset + 14);
+
+	// Register in kernel_hook_list for same-page tracking
+	hook::kernel_hook_info_t hook_info = { };
+	hook_info.set_mapped_shadow_page(shadow_page);
+	hook_info.original_page_pfn = target_pfn;
+	hook_info.overflow_original_page_pfn = 0;
+	hook_info.detour_holder_shadow_offset = 0; // manages own shellcode separately
+	hook_info.is_shadow_page_owner = is_owner ? 1 : 0;
+	hook_info.patched_byte_count = 14;
+
+	hook::kernel_hook_list[hook_va] = hook_info;
+
+	ki_sc64se_hook_va = hook_va;
+
+	std::println("[+] InstrumentationCallback bypass hook installed at 0x{:X} (14 bytes, owner={})", hook_va, is_owner);
+	return true;
+}
+
+inline bool remove_ki_syscall64_service_exit_hook()
+{
+	if (ki_sc64se_hook_va == 0)
+	{
+		std::println("[-] No InstrumentationCallback bypass hook to remove");
+		return false;
+	}
+
+	if (hook::kernel_hook_list.contains(ki_sc64se_hook_va) == false)
+	{
+		std::println("[-] Callback bypass hook not found in kernel_hook_list");
+		return false;
+	}
+
+	hook::kernel_hook_info_t hook_info = hook::kernel_hook_list[ki_sc64se_hook_va];
+
+	// Check if another hook shares this physical page
+	hook::kernel_hook_info_t* other_hook = hook::find_hook_on_same_page(hook_info.original_page_pfn, ki_sc64se_hook_va);
+
+	if (other_hook != nullptr)
+	{
+		// Shared page: restore original bytes on shadow, skip EPT removal and shadow free
+		auto saved_it = hook::saved_shadow_bytes.find(ki_sc64se_hook_va);
+
+		if (saved_it != hook::saved_shadow_bytes.end())
+		{
+			std::uint64_t page_offset = ki_sc64se_hook_va & 0xFFF;
+			std::uint8_t* shadow = static_cast<std::uint8_t*>(hook_info.get_mapped_shadow_page());
+			memcpy(shadow + page_offset, saved_it->second.data(), saved_it->second.size());
+			hook::saved_shadow_bytes.erase(saved_it);
+		}
+
+		// Transfer ownership if needed
+		if (hook_info.is_shadow_page_owner == 1)
+		{
+			other_hook->is_shadow_page_owner = 1;
+		}
+
+		std::println("[+] Callback bypass removed from shared shadow page (ownership transferred: {})",
+			hook_info.is_shadow_page_owner == 1);
+	}
+	else
+	{
+		// Sole hook on page: full teardown
+		if (hypercall::remove_slat_code_hook(hook_info.original_page_pfn << 12) == 0)
+		{
+			std::println("[-] Failed to remove EPT hook for callback bypass");
+			return false;
+		}
+
+		sys::user::free_memory(hook_info.get_mapped_shadow_page());
+		hook::saved_shadow_bytes.erase(ki_sc64se_hook_va);
+	}
+
+	hook::kernel_hook_list.erase(ki_sc64se_hook_va);
+
+	// Free shellcode allocation in detour holder
+	if (ki_sc64se_shellcode_detour_offset != 0)
+	{
+		void* sc_alloc = kernel_detour_holder::get_allocation_from_offset(ki_sc64se_shellcode_detour_offset);
+		kernel_detour_holder::free_memory(sc_alloc);
+		ki_sc64se_shellcode_detour_offset = 0;
+	}
+
+	std::println("[+] InstrumentationCallback bypass hook removed");
+	ki_sc64se_hook_va = 0;
+
+	return true;
+}
+
+//=============================================================================
 // Main injection entry point
 //=============================================================================
 
@@ -1101,13 +1469,36 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 		}
 	}
 
-	// 12. Print stats before trigger
+	// 12. Install InstrumentationCallback bypass hook BEFORE hijack_thread
+	// With multi-hook per page support, callback bypass and KiSystemServiceExit
+	// can coexist on the same shadow page (0x42F000). Callback bypass creates
+	// the shadow page (owner), KiSSE reuses it during hijack_thread.
+	// This means DllMain executes with callback bypass already active.
+	if (sys::offsets::ki_system_call64_service_exit_rva != 0)
+	{
+		if (install_ki_syscall64_service_exit_hook(process->eprocess, hidden_pml4_index))
+		{
+			std::println("[+] InstrumentationCallback bypass active — will protect DllMain syscalls");
+		}
+		else
+		{
+			std::println("[!] WARNING: InstrumentationCallback bypass hook failed (callbacks may intercept our syscalls)");
+		}
+	}
+	else
+	{
+		std::println("[!] WARNING: KiSystemCall64 service exit pattern not found — no callback bypass");
+	}
+
+	// 13. Print stats before trigger
 	std::println("[+] CR3 stats before trigger: exits={} swaps={} mmaf_hits={} ept_violations={}",
 		hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(), hypercall::read_mmaf_hit_count(),
 		hypercall::read_slat_violation_count());
 
-	// 13. Call DllMain via syscall hijack (trap frame RIP overwrite)
-	// skip_dllmain=true: shellcode writes Status=1→2 without calling DllMain (debug BSOD)
+	// 14. Call DllMain via syscall hijack (trap frame RIP overwrite)
+	// KiSSE hook will share the same shadow page as callback bypass (multi-hook per page).
+	// hijack_thread installs KiSSE (non-owner on shared page), waits for DllMain, then removes it.
+	// Callback bypass remains active throughout.
 	constexpr bool skip_dllmain_debug = false;
 	bool dllmain_result = hijack_thread(
 		cloned_cr3, process->cr3, process->eprocess,
@@ -1130,11 +1521,17 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	// DLL is persistent (runs threads, hooks PresentThread) — keep infrastructure active:
 	//   - CR3 intercept: swaps to clone on MOV CR3 (context switch)
 	//   - MmAccessFault hook: swaps to clone on PML4[70] page fault
+	//   - InstrumentationCallback bypass: protects hidden memory syscalls
 	//   - UserDTB interception: handles KPTI user/kernel DTB swap
 	// Only the KiSSE hook was removed inside hijack_thread() after DllMain returned.
 	if (!dllmain_result)
 	{
 		// DllMain failed — tear down everything
+		if (ki_sc64se_hook_va != 0)
+		{
+			remove_ki_syscall64_service_exit_hook();
+			std::println("[*] InstrumentationCallback bypass hook removed");
+		}
 		if (user_dtb != 0)
 		{
 			hypercall::clear_user_cr3();
@@ -1147,7 +1544,7 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	}
 	else
 	{
-		std::println("[+] DLL persistent — CR3 intercept + MmAccessFault hook remain active");
+		std::println("[+] DLL persistent — CR3 intercept + MmAccessFault + callback bypass hooks remain active");
 	}
 
 	return dllmain_result;
@@ -1171,7 +1568,18 @@ inline void uninject()
 		std::println("[+] KiSystemServiceExit hook removed");
 	}
 
-	// 3. Remove MmAccessFault hook
+	// 3. Remove InstrumentationCallback bypass hook
+	if (ki_sc64se_hook_va != 0)
+	{
+		remove_ki_syscall64_service_exit_hook();
+		std::println("[+] InstrumentationCallback bypass hook removed");
+	}
+	else
+	{
+		std::println("[*] InstrumentationCallback bypass hook not active");
+	}
+
+	// 4. Remove MmAccessFault hook
 	if (mmaf_hook_va != 0)
 	{
 		remove_mmaf_hook();
@@ -1182,15 +1590,15 @@ inline void uninject()
 		std::println("[*] MmAccessFault hook not active");
 	}
 
-	// 4. Clear UserDTB interception
+	// 5. Clear UserDTB interception
 	hypercall::clear_user_cr3();
 	std::println("[+] UserDTB interception cleared");
 
-	// 5. Disable CR3 intercept (also resets enforce_active)
+	// 6. Disable CR3 intercept (also resets enforce_active)
 	hypercall::disable_cr3_intercept();
 	std::println("[+] CR3 intercept disabled");
 
-	// 6. Print final stats
+	// 7. Print final stats
 	std::println("[+] Final stats: exits={} swaps={} mmaf_hits={} ept_violations={}",
 		hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(),
 		hypercall::read_mmaf_hit_count(), hypercall::read_slat_violation_count());

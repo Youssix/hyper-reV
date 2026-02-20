@@ -966,6 +966,50 @@ void process_mmafstat(CLI::App* mmafstat)
 	std::println("mmaf_hit_count = {}, slat_violation_count = {}", hit_count, violation_count);
 }
 
+CLI::App* init_hookcb(CLI::App& app)
+{
+	CLI::App* hookcb = app.add_subcommand("hookcb", "install InstrumentationCallback bypass hook on KiSystemCall64 (protects PML4[70] syscalls from callback redirection)")->ignore_case();
+
+	return hookcb;
+}
+
+void process_hookcb(CLI::App* hookcb)
+{
+	if (inject::ki_sc64se_target_eprocess == 0)
+	{
+		std::println("no target EPROCESS set — inject a DLL first");
+		return;
+	}
+
+	if (inject::install_ki_syscall64_service_exit_hook(inject::ki_sc64se_target_eprocess))
+	{
+		std::println("InstrumentationCallback bypass hook installed (EPROCESS: 0x{:X})", inject::ki_sc64se_target_eprocess);
+	}
+	else
+	{
+		std::println("failed to install InstrumentationCallback bypass hook");
+	}
+}
+
+CLI::App* init_unhookcb(CLI::App& app)
+{
+	CLI::App* unhookcb = app.add_subcommand("unhookcb", "remove InstrumentationCallback bypass hook")->ignore_case();
+
+	return unhookcb;
+}
+
+void process_unhookcb(CLI::App* unhookcb)
+{
+	if (inject::remove_ki_syscall64_service_exit_hook())
+	{
+		std::println("InstrumentationCallback bypass hook removed");
+	}
+	else
+	{
+		std::println("failed to remove InstrumentationCallback bypass hook");
+	}
+}
+
 CLI::App* init_injectdll(CLI::App& app)
 {
 	CLI::App* injectdll = app.add_subcommand("injectdll", "inject a DLL into a process using hidden memory (PE manual map + syscall exit EPT hook)")->ignore_case();
@@ -1070,6 +1114,8 @@ void commands::process(const std::string command)
 	CLI::App* hookmmaf = init_hookmmaf(app, aliases_transformer);
 	CLI::App* unhookmmaf = init_unhookmmaf(app);
 	CLI::App* mmafstat = init_mmafstat(app);
+	CLI::App* hookcb = init_hookcb(app);
+	CLI::App* unhookcb = init_unhookcb(app);
 	CLI::App* injectdll = init_injectdll(app);
 	CLI::App* uninject = init_uninject(app);
 
@@ -1110,6 +1156,8 @@ void commands::process(const std::string command)
 		d_process_command(hookmmaf);
 		d_process_command(unhookmmaf);
 		d_process_command(mmafstat);
+		d_process_command(hookcb);
+		d_process_command(unhookcb);
 		d_process_command(injectdll);
 		d_process_command(uninject);
 	}

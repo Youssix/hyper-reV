@@ -323,6 +323,37 @@ std::optional<ntoskrnl_information_t> load_ntoskrnl_information()
 	return std::nullopt;
 }
 
+std::uint64_t scan_pattern_in_module(const std::vector<std::uint8_t>& module_dump,
+	const std::uint8_t* pattern, const char* mask, std::size_t pattern_size)
+{
+	const auto* image = reinterpret_cast<const portable_executable::image_t*>(module_dump.data());
+
+	for (const auto& section : image->sections())
+	{
+		if (section.characteristics.mem_execute == 0) continue;
+
+		std::uint64_t section_start = section.virtual_address;
+		std::uint64_t section_end = section_start + section.virtual_size;
+
+		if (section_end > module_dump.size())
+			section_end = module_dump.size();
+
+		if (section_start + pattern_size > section_end) continue;
+
+		for (std::uint64_t i = section_start; i <= section_end - pattern_size; i++)
+		{
+			bool found = true;
+			for (std::size_t j = 0; j < pattern_size; j++)
+			{
+				if (mask[j] == '?') continue;
+				if (module_dump[i + j] != pattern[j]) { found = false; break; }
+			}
+			if (found) return i;
+		}
+	}
+	return 0;
+}
+
 std::uint8_t parse_ntoskrnl()
 {
 	std::optional<ntoskrnl_information_t> ntoskrnl_info = load_ntoskrnl_information();
@@ -347,6 +378,27 @@ std::uint8_t parse_ntoskrnl()
 		std::println("unable to locate kernel hook holder");
 
 		return 0;
+	}
+
+	// Pattern scan for KiSystemCall64 instrumentation callback exit point
+	// Signature: mov r10, [rbp+0xE8] ; mov [rbp+0xE8], rax
+	// 4C 8B 95 E8 ?? ?? ?? 48 89 85 E8
+	{
+		const std::uint8_t pattern[] = { 0x4C, 0x8B, 0x95, 0xE8, 0x00, 0x00, 0x00, 0x48, 0x89, 0x85, 0xE8 };
+		const char mask[] = "xxxx???xxxx";
+
+		std::uint64_t rva = scan_pattern_in_module(ntoskrnl_dump, pattern, mask, sizeof(pattern));
+		if (rva != 0)
+		{
+			sys::offsets::ki_system_call64_service_exit_rva = rva;
+			std::int32_t disp = *reinterpret_cast<const std::int32_t*>(&ntoskrnl_dump[rva + 3]);
+			sys::offsets::ki_system_call64_service_exit_disp = disp;
+			std::println("[+] KiSystemCall64 service exit hook point: RVA=0x{:X}, [rbp+0x{:X}]", rva, disp);
+		}
+		else
+		{
+			std::println("[!] WARNING: KiSystemCall64 service exit pattern not found");
+		}
 	}
 
 	return 1;

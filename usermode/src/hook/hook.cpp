@@ -11,6 +11,19 @@
 
 #include "hook_disassembly.h"
 
+hook::kernel_hook_info_t* hook::find_hook_on_same_page(std::uint64_t target_pfn, std::uint64_t excluding_va)
+{
+	for (auto& [va, info] : kernel_hook_list)
+	{
+		if (va != excluding_va && info.original_page_pfn == target_pfn)
+		{
+			return &info;
+		}
+	}
+
+	return nullptr;
+}
+
 std::uint8_t hook::set_up()
 {
 	kernel_detour_holder_shadow_page_mapped = static_cast<std::uint8_t*>(sys::user::allocate_locked_memory(0x1000, PAGE_READWRITE));
@@ -53,12 +66,12 @@ std::uint8_t hook::set_up()
 
 void hook::clean_up()
 {
-	for (const auto& [virtual_address, info] : kernel_hook_list)
+	while (kernel_hook_list.empty() == false)
 	{
-		remove_kernel_hook(virtual_address, 0);
+		remove_kernel_hook(kernel_hook_list.begin()->first, 1);
 	}
 
-	kernel_hook_list.clear();
+	saved_shadow_bytes.clear();
 
 	if (kernel_detour_holder_physical_page != 0)
 	{
@@ -200,6 +213,79 @@ std::uint8_t hook::add_kernel_hook(std::uint64_t routine_to_hook_virtual, const 
 
 	const std::uint8_t is_overflow_hook = 0x1000 < hook_end;
 
+	const std::uint64_t target_pfn = routine_to_hook_physical >> 12;
+	kernel_hook_info_t* existing_hook = find_hook_on_same_page(target_pfn);
+
+	// === Same-page path: reuse existing shadow page ===
+	if (existing_hook != nullptr)
+	{
+		if (is_overflow_hook == 1 || existing_hook->overflow_original_page_pfn != 0)
+		{
+			return 0; // overflow hooks can't share pages
+		}
+
+		std::uint8_t* shadow_page_virtual = static_cast<std::uint8_t*>(existing_hook->get_mapped_shadow_page());
+
+		// Shadow already has original bytes at our offset (only the other hook's offset is patched)
+		std::pair<std::vector<std::uint8_t>, std::uint64_t> original_bytes = hook_disasm::get_routine_aligned_bytes(
+			shadow_page_virtual + page_offset,
+			d_inline_hook_bytes_size + extra_assembled_bytes.size() + post_original_assembled_bytes.size(),
+			routine_to_hook_virtual);
+
+		if (original_bytes.first.empty() == true)
+		{
+			return 0;
+		}
+
+		std::uint16_t detour_holder_shadow_offset = 0;
+
+		std::uint8_t status = set_up_hook_handler(routine_to_hook_virtual, detour_holder_shadow_offset, original_bytes, extra_assembled_bytes, post_original_assembled_bytes);
+
+		if (status == 0)
+		{
+			return 0;
+		}
+
+		std::uint64_t detour_address = kernel_detour_holder_base + detour_holder_shadow_offset;
+
+		// Compute patch size and save original shadow bytes before patching
+		std::uint64_t patch_size = post_original_assembled_bytes.empty()
+			? extra_assembled_bytes.size() + d_inline_hook_bytes_size
+			: original_bytes.second;
+
+		saved_shadow_bytes[routine_to_hook_virtual] = std::vector<std::uint8_t>(
+			shadow_page_virtual + page_offset,
+			shadow_page_virtual + page_offset + patch_size);
+
+		// Write inline hook onto existing shadow page
+		std::uint64_t overflow_shadow = 0, overflow_original = 0;
+
+		std::uint64_t hook_status = set_up_inline_hook(shadow_page_virtual, routine_to_hook_virtual, routine_to_hook_physical, detour_address, original_bytes, extra_assembled_bytes, post_original_assembled_bytes, 0, overflow_shadow, overflow_original);
+
+		if (hook_status == 0)
+		{
+			saved_shadow_bytes.erase(routine_to_hook_virtual);
+			return 0;
+		}
+
+		// Skip add_slat_code_hook — EPT already registered by the page owner
+
+		kernel_hook_info_t hook_info = { };
+
+		hook_info.set_mapped_shadow_page(shadow_page_virtual);
+		hook_info.original_page_pfn = target_pfn;
+		hook_info.overflow_original_page_pfn = 0;
+		hook_info.detour_holder_shadow_offset = detour_holder_shadow_offset;
+		hook_info.is_shadow_page_owner = 0;
+		hook_info.patched_byte_count = static_cast<std::uint64_t>(patch_size);
+
+		kernel_hook_list[routine_to_hook_virtual] = hook_info;
+
+		return 1;
+	}
+
+	// === Normal path: allocate new shadow page ===
+
 	void* shadow_page_virtual = sys::user::allocate_locked_memory(is_overflow_hook == 1 ? 0x2000 : 0x1000, PAGE_READWRITE);
 
 	if (shadow_page_virtual == nullptr)
@@ -232,6 +318,15 @@ std::uint8_t hook::add_kernel_hook(std::uint64_t routine_to_hook_virtual, const 
 
 	std::uint64_t detour_address = kernel_detour_holder_base + detour_holder_shadow_offset;
 
+	// Compute patch size and save original shadow bytes before patching
+	std::uint64_t patch_size = post_original_assembled_bytes.empty()
+		? extra_assembled_bytes.size() + d_inline_hook_bytes_size
+		: original_bytes.second;
+
+	saved_shadow_bytes[routine_to_hook_virtual] = std::vector<std::uint8_t>(
+		static_cast<std::uint8_t*>(shadow_page_virtual) + page_offset,
+		static_cast<std::uint8_t*>(shadow_page_virtual) + page_offset + patch_size);
+
 	std::uint64_t overflow_shadow_page_physical_address = 0;
 	std::uint64_t overflow_original_page_physical_address = 0;
 
@@ -239,6 +334,7 @@ std::uint8_t hook::add_kernel_hook(std::uint64_t routine_to_hook_virtual, const 
 
 	if (hook_status == 0)
 	{
+		saved_shadow_bytes.erase(routine_to_hook_virtual);
 		return 0;
 	}
 
@@ -246,6 +342,7 @@ std::uint8_t hook::add_kernel_hook(std::uint64_t routine_to_hook_virtual, const 
 
 	if (hook_status == 0)
 	{
+		saved_shadow_bytes.erase(routine_to_hook_virtual);
 		return 0;
 	}
 
@@ -255,6 +352,7 @@ std::uint8_t hook::add_kernel_hook(std::uint64_t routine_to_hook_virtual, const 
 
 		if (hook_status == 0)
 		{
+			saved_shadow_bytes.erase(routine_to_hook_virtual);
 			return 0;
 		}
 	}
@@ -262,10 +360,12 @@ std::uint8_t hook::add_kernel_hook(std::uint64_t routine_to_hook_virtual, const 
 	kernel_hook_info_t hook_info = { };
 
 	hook_info.set_mapped_shadow_page(shadow_page_virtual);
-	hook_info.original_page_pfn = routine_to_hook_physical >> 12;
+	hook_info.original_page_pfn = target_pfn;
 	hook_info.overflow_original_page_pfn = overflow_original_page_physical_address >> 12;
 	hook_info.detour_holder_shadow_offset = detour_holder_shadow_offset;
-	
+	hook_info.is_shadow_page_owner = 1;
+	hook_info.patched_byte_count = static_cast<std::uint64_t>(patch_size);
+
 	kernel_hook_list[routine_to_hook_virtual] = hook_info;
 
 	return 1;
@@ -282,18 +382,53 @@ std::uint8_t hook::remove_kernel_hook(std::uint64_t hooked_routine_virtual, std:
 
 	kernel_hook_info_t hook_info = kernel_hook_list[hooked_routine_virtual];
 
-	if (hypercall::remove_slat_code_hook(hook_info.original_page_pfn << 12) == 0)
-	{
-		std::println("unable to remove slat counterpart of kernel hook");
+	// Check if another hook shares this physical page
+	kernel_hook_info_t* other_hook = find_hook_on_same_page(hook_info.original_page_pfn, hooked_routine_virtual);
 
-		return 0;
+	if (other_hook != nullptr)
+	{
+		// Shared page: restore original bytes on shadow, skip EPT removal and shadow free
+		auto saved_it = saved_shadow_bytes.find(hooked_routine_virtual);
+
+		if (saved_it != saved_shadow_bytes.end())
+		{
+			const std::uint64_t page_offset = hooked_routine_virtual & 0xFFF;
+			std::uint8_t* shadow = static_cast<std::uint8_t*>(hook_info.get_mapped_shadow_page());
+			memcpy(shadow + page_offset, saved_it->second.data(), saved_it->second.size());
+			saved_shadow_bytes.erase(saved_it);
+		}
+
+		// Transfer shadow page ownership if needed
+		if (hook_info.is_shadow_page_owner == 1)
+		{
+			other_hook->is_shadow_page_owner = 1;
+		}
 	}
-
-	if (hook_info.overflow_original_page_pfn != 0 && hypercall::remove_slat_code_hook(hook_info.overflow_original_page_pfn << 12) == 0)
+	else
 	{
-		std::println("unable to remove slat counterpart of kernel hook (2)");
+		// Sole hook on page: remove EPT and free shadow page
+		if (hypercall::remove_slat_code_hook(hook_info.original_page_pfn << 12) == 0)
+		{
+			std::println("unable to remove slat counterpart of kernel hook");
 
-		return 0;
+			return 0;
+		}
+
+		if (hook_info.overflow_original_page_pfn != 0 && hypercall::remove_slat_code_hook(hook_info.overflow_original_page_pfn << 12) == 0)
+		{
+			std::println("unable to remove slat counterpart of kernel hook (2)");
+
+			return 0;
+		}
+
+		if (sys::user::free_memory(hook_info.get_mapped_shadow_page()) == 0)
+		{
+			std::println("unable to deallocate mapped shadow page");
+
+			return 0;
+		}
+
+		saved_shadow_bytes.erase(hooked_routine_virtual);
 	}
 
 	if (do_list_erase == 1)
@@ -301,15 +436,11 @@ std::uint8_t hook::remove_kernel_hook(std::uint64_t hooked_routine_virtual, std:
 		kernel_hook_list.erase(hooked_routine_virtual);
 	}
 
-	void* detour_holder_allocation = kernel_detour_holder::get_allocation_from_offset(hook_info.detour_holder_shadow_offset);
-
-	kernel_detour_holder::free_memory(detour_holder_allocation);
-
-	if (sys::user::free_memory(hook_info.get_mapped_shadow_page()) == 0)
+	// Free detour holder allocation (if this hook has one)
+	if (hook_info.detour_holder_shadow_offset != 0)
 	{
-		std::println("unable to deallocate mapped shadow page");
-
-		return 0;
+		void* detour_holder_allocation = kernel_detour_holder::get_allocation_from_offset(hook_info.detour_holder_shadow_offset);
+		kernel_detour_holder::free_memory(detour_holder_allocation);
 	}
 
 	return 1;

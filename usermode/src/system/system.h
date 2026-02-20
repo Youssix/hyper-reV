@@ -84,6 +84,11 @@ namespace sys
 		// KiSystemServiceExit RVA (resolved from PDB, for EPT hook)
 		inline std::uint64_t ki_system_service_exit_rva = 0;
 
+		// KiSystemCall64 service exit instrumentation callback hook point (pattern scan)
+		// Hooks "mov r10, [rbp+disp]" to bypass InstrumentationCallback for hidden memory syscalls
+		inline std::uint64_t ki_system_call64_service_exit_rva = 0;
+		inline std::int32_t ki_system_call64_service_exit_disp = 0; // [rbp+disp] from matched instruction
+
 		// KTRAP_FRAME offsets (stable across Win10/11)
 		constexpr std::uint64_t ktrap_frame_rip = 0x168;
 		constexpr std::uint64_t ktrap_frame_rsp = 0x180;
