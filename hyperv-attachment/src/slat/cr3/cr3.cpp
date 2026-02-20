@@ -44,6 +44,23 @@ void slat::set_cr3(const cr3 slat_cr3)
 	flush_current_logical_processor_cache(1);
 }
 
+bool slat::is_our_eptp(const cr3 current_eptp)
+{
+	const std::uint64_t pml4 = current_eptp.address_of_page_directory;
+
+	if (hyperv_slat_cr3.flags != 0 && pml4 == hyperv_slat_cr3.address_of_page_directory)
+	{
+		return true;
+	}
+
+	if (hook_slat_cr3.flags != 0 && pml4 == hook_slat_cr3.address_of_page_directory)
+	{
+		return true;
+	}
+
+	return false;
+}
+
 void slat::flush_current_logical_processor_cache(const std::uint8_t has_slat_cr3_changed)
 {
 #ifdef _INTELMACHINE

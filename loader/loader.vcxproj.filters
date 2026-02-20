@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Source Files\renderer">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-444455556666}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\pages">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-444455557777}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\system_check">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-444455558888}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\auth">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-444455559999}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\backend">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-44445555AAAA}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\usermode">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-44445555BBBB}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\renderer">
+      <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566661111}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\pages">
+      <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566662222}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\system_check">
+      <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566663333}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\auth">
+      <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566664444}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\backend">
+      <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566665555}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <!-- Loader source files -->
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\app.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\renderer\renderer.cpp">
+      <Filter>Source Files\renderer</Filter>
+    </ClCompile>
+    <ClCompile Include="src\renderer\theme.cpp">
+      <Filter>Source Files\renderer</Filter>
+    </ClCompile>
+    <ClCompile Include="src\pages\system_check.cpp">
+      <Filter>Source Files\pages</Filter>
+    </ClCompile>
+    <ClCompile Include="src\pages\login.cpp">
+      <Filter>Source Files\pages</Filter>
+    </ClCompile>
+    <ClCompile Include="src\pages\dashboard.cpp">
+      <Filter>Source Files\pages</Filter>
+    </ClCompile>
+    <ClCompile Include="src\system_check\system_info.cpp">
+      <Filter>Source Files\system_check</Filter>
+    </ClCompile>
+    <ClCompile Include="src\auth\auth_client.cpp">
+      <Filter>Source Files\auth</Filter>
+    </ClCompile>
+    <ClCompile Include="src\backend\loader_backend.cpp">
+      <Filter>Source Files\backend</Filter>
+    </ClCompile>
+    <!-- Usermode shared sources -->
+    <ClCompile Include="..\usermode\src\hypercall\hypercall.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\src\hook\hook.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\src\hook\hook_disassembly.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\src\hook\kernel_detour_holder.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\src\system\system.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\src\pdb\pdb.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\data_directory.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\dos_header.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\export_directory.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\file.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\image.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\imports_directory.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\nt_headers.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\relocations_directory.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\usermode\ext\portable_executable\section_header.cpp">
+      <Filter>Source Files\usermode</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <!-- MASM -->
+  <ItemGroup>
+    <MASM Include="..\usermode\src\hypercall\vmexit.asm">
+      <Filter>Source Files\usermode</Filter>
+    </MASM>
+  </ItemGroup>
+  <!-- Loader headers -->
+  <ItemGroup>
+    <ClInclude Include="src\app.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\renderer\renderer.h">
+      <Filter>Header Files\renderer</Filter>
+    </ClInclude>
+    <ClInclude Include="src\renderer\theme.h">
+      <Filter>Header Files\renderer</Filter>
+    </ClInclude>
+    <ClInclude Include="src\pages\page.h">
+      <Filter>Header Files\pages</Filter>
+    </ClInclude>
+    <ClInclude Include="src\pages\system_check.h">
+      <Filter>Header Files\pages</Filter>
+    </ClInclude>
+    <ClInclude Include="src\pages\login.h">
+      <Filter>Header Files\pages</Filter>
+    </ClInclude>
+    <ClInclude Include="src\pages\dashboard.h">
+      <Filter>Header Files\pages</Filter>
+    </ClInclude>
+    <ClInclude Include="src\system_check\system_info.h">
+      <Filter>Header Files\system_check</Filter>
+    </ClInclude>
+    <ClInclude Include="src\auth\auth_types.h">
+      <Filter>Header Files\auth</Filter>
+    </ClInclude>
+    <ClInclude Include="src\auth\auth_client.h">
+      <Filter>Header Files\auth</Filter>
+    </ClInclude>
+    <ClInclude Include="src\backend\loader_backend.h">
+      <Filter>Header Files\backend</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <!-- Resources -->
+  <ItemGroup>
+    <ResourceCompile Include="resources\loader.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+</Project>

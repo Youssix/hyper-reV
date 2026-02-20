@@ -127,6 +127,45 @@ UINT64 find_hyperv_text_end(cr3 hyperv_cr3, virtual_address_t entry_point)
     return text_address.address - 0x1000;
 }
 
+void build_entry_trampoline(CHAR8* code_cave, CHAR8* entry_point_address)
+{
+    // Copy 18 displaced bytes (3 complete instructions) from the entry point
+    mm_copy_memory(code_cave, entry_point_address, 18);
+
+    // Build 14-byte JMP back to entry_point + 18
+    // push low32; mov [rsp+4], high32; ret
+    parted_address_t return_address = { .value = (UINT64)(entry_point_address + 18) };
+
+    UINT8 jmp_back[14] = {
+        0x68, 0x00, 0x00, 0x00, 0x00,                          // push low32
+        0xC7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00,       // mov [rsp+4], high32
+        0xC3                                                     // ret
+    };
+
+    *(UINT32*)(&jmp_back[1]) = return_address.u.low_part;
+    *(UINT32*)(&jmp_back[9]) = return_address.u.high_part;
+
+    mm_copy_memory(code_cave + 18, jmp_back, sizeof(jmp_back));
+}
+
+void hook_entry_point(CHAR8* entry_point_address, UINT8* detour_target)
+{
+    // Write 14-byte JMP at entry point -> detour_target (attachment's ASM stub)
+    // push low32; mov [rsp+4], high32; ret
+    parted_address_t target = { .value = (UINT64)detour_target };
+
+    UINT8 hook_bytes[14] = {
+        0x68, 0x00, 0x00, 0x00, 0x00,                          // push low32
+        0xC7, 0x44, 0x24, 0x04, 0x00, 0x00, 0x00, 0x00,       // mov [rsp+4], high32
+        0xC3                                                     // ret
+    };
+
+    *(UINT32*)(&hook_bytes[1]) = target.u.low_part;
+    *(UINT32*)(&hook_bytes[9]) = target.u.high_part;
+
+    mm_copy_memory(entry_point_address, hook_bytes, sizeof(hook_bytes));
+}
+
 void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 {
     AsmWriteCr3(hyperv_cr3.flags);
@@ -163,7 +202,7 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
                 INT32 original_vmexit_handler_rva = *(INT32*)(code_ref_to_vmexit_handler + 1);
                 CHAR8* original_vmexit_handler = (code_ref_to_vmexit_handler + 5) + original_vmexit_handler_rva;
 
-                UINT8* hyperv_attachment_vmexit_handler_detour = NULL;
+                UINT8* hyperv_attachment_detours[2] = { NULL, NULL };
 
                 CHAR8* get_vmcb_gadget = NULL;
 
@@ -181,15 +220,45 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
                 UINT64 heap_physical_usable_base = hyperv_attachment_heap_allocation_usable_base;
                 UINT64 heap_total_size = hyperv_attachment_heap_allocation_size;
 
-                hyperv_attachment_invoke_entry_point(&hyperv_attachment_vmexit_handler_detour, hyperv_attachment_entry_point, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget);
+                // Intel: scan for VMEXIT entry point and find second code cave for trampoline
+                // DEBUG: Hook 1 disabled — testing if Hook 2 alone boots correctly
+                UINT64 vmexit_entry_trampoline = 0;
+                CHAR8* vmexit_entry_point = NULL;
 
+                if (is_intel == 1)
+                {
+                    status = scan_image(&vmexit_entry_point, (CHAR8*)hyperv_text_base, hyperv_text_size,
+                        "\xC7\x44\x24\x00\x00\x00\x00\x00\x48\x89\x4C\x24\x00\x48\x8B\x4C\x24",
+                        "xxx?????xxxx?xxx?");
+
+                    if (status == EFI_SUCCESS)
+                    {
+                        // Find a code cave large enough for the entry trampoline (32 bytes = 18 displaced + 14 JMP back)
+                        CHAR8* code_cave_2 = NULL;
+
+                        status = scan_image(&code_cave_2, (CHAR8*)hyperv_text_base, hyperv_text_size,
+                            "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC"
+                            "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC",
+                            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+
+                        if (status == EFI_SUCCESS)
+                        {
+                            build_entry_trampoline(code_cave_2, vmexit_entry_point);
+                            vmexit_entry_trampoline = (UINT64)code_cave_2;
+                        }
+                    }
+                }
+
+                hyperv_attachment_invoke_entry_point(hyperv_attachment_detours, hyperv_attachment_entry_point, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget, vmexit_entry_trampoline);
+
+                // Hook 2: processing hook on the CALL to vmexit handler (existing mechanism)
                 CHAR8* code_cave = NULL;
 
                 status = scan_image(&code_cave, (CHAR8*)hyperv_text_base, hyperv_text_size, "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC", "xxxxxxxxxxxxxxxx");
 
                 if (status == EFI_SUCCESS)
                 {
-                    status = hook_create(&hv_vmexit_hook_data, code_cave, hyperv_attachment_vmexit_handler_detour);
+                    status = hook_create(&hv_vmexit_hook_data, code_cave, hyperv_attachment_detours[0]);
 
                     if (status == EFI_SUCCESS)
                     {
@@ -199,6 +268,12 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 
                         mm_copy_memory(code_ref_to_vmexit_handler + 1, (UINT8*)&new_call_rva, sizeof(new_call_rva));
                     }
+                }
+
+                // Hook 1: entry point hook (Intel only, fast path)
+                if (is_intel == 1 && vmexit_entry_trampoline != 0 && vmexit_entry_point != NULL && hyperv_attachment_detours[1] != NULL)
+                {
+                    hook_entry_point(vmexit_entry_point, hyperv_attachment_detours[1]);
                 }
             }
         }

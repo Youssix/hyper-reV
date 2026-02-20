@@ -12,6 +12,7 @@ namespace arch
 
 	std::uint8_t is_non_maskable_interrupt_exit(std::uint64_t vmexit_reason);
 	std::uint8_t is_mov_cr(std::uint64_t vmexit_reason);
+	std::uint8_t is_vmcall(std::uint64_t vmexit_reason);
 
 	void enable_cr3_exiting();
 	void disable_cr3_exiting();
@@ -37,6 +38,12 @@ namespace arch
 	std::uint64_t get_guest_physical_address();
 
 	void invalidate_vpid_current();
+
+	// TSC offset manipulation (hide VMEXIT latency from guest)
+	void adjust_tsc_offset(std::int64_t delta);
+
+	// Event injection (inject exception into guest on VM entry)
+	void inject_exception(std::uint8_t vector);
 #else
 	vmcb_t* get_vmcb();
 	void parse_vmcb_gadget(const std::uint8_t* get_vmcb_gadget);

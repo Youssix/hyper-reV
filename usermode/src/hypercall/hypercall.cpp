@@ -165,9 +165,14 @@ std::uint64_t hypercall::read_mmaf_hit_count()
 	return make_hypercall(hypercall_type_t::read_guest_cr3, 6, 0, 0, 0);
 }
 
-std::uint64_t hypercall::arm_syscall_hijack(std::uint64_t shellcode_va)
+std::uint64_t hypercall::read_slat_violation_count()
 {
-	return make_hypercall(hypercall_type_t::read_guest_cr3, 8, shellcode_va, 0, 0);
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 11, 0, 0, 0);
+}
+
+std::uint64_t hypercall::arm_syscall_hijack(std::uint64_t shellcode_va, std::uint64_t rip_offset)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 8, shellcode_va, rip_offset, 0);
 }
 
 std::uint64_t hypercall::disarm_syscall_hijack()

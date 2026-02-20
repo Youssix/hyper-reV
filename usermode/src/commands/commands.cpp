@@ -961,8 +961,9 @@ CLI::App* init_mmafstat(CLI::App& app)
 void process_mmafstat(CLI::App* mmafstat)
 {
 	const std::uint64_t hit_count = hypercall::read_mmaf_hit_count();
+	const std::uint64_t violation_count = hypercall::read_slat_violation_count();
 
-	std::println("mmaf_hit_count = {}", hit_count);
+	std::println("mmaf_hit_count = {}, slat_violation_count = {}", hit_count, violation_count);
 }
 
 CLI::App* init_injectdll(CLI::App& app)

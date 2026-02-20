@@ -66,6 +66,9 @@
     <ClCompile Include="src\slat\hook\hook_entry.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\vmexit_entry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ext\ia32-doc\ia32.hpp">
@@ -146,6 +149,9 @@
       <Filter>Source Files</Filter>
     </MASM>
     <MASM Include="src\arch\intel_invvpid.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
+    <MASM Include="src\arch\vmexit_entry_stub.asm">
       <Filter>Source Files</Filter>
     </MASM>
   </ItemGroup>

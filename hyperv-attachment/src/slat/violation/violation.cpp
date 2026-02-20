@@ -8,6 +8,7 @@
 #include "../../logs/logs.h"
 #include "../../crt/crt.h"
 #include "../../structures/virtual_address.h"
+#include "../../cr3_intercept.h"
 
 std::uint8_t slat::violation::process()
 {
@@ -61,12 +62,10 @@ std::uint8_t slat::violation::process()
 
 	if (hook_entry == nullptr)
 	{
-		// potentially newly added executable page
-		if (qualification.execute_access)
-		{
-			set_cr3(hyperv_cr3());
-		}
-
+		// Always restore hyperv_cr3 before falling through to Hyper-V.
+		// If we're on hook_cr3 (from a previous toggle), Hyper-V doesn't
+		// recognize that EPTP and will VMRESUME without fixing → loop → BSOD.
+		set_cr3(hyperv_cr3());
 		return 0;
 	}
 

@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(powershell.exe -Command \"Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Select-Object FeatureName, State\")"
+      "Bash(powershell.exe -Command \"Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Select-Object FeatureName, State\")",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(reg query:*)"
     ]
   }
 }

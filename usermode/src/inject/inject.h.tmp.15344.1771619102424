@@ -1118,6 +1118,73 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	// Print mmaf hit count after trigger
 	std::println("[+] mmaf_hit_count after trigger: {}, ept_violations: {}", hypercall::read_mmaf_hit_count(), hypercall::read_slat_violation_count());
 
+	// === Read CRT diagnostic data from hidden memory ===
+	// Scan .diag section for marker 0xD1A6D1A6
+	{
+		// Re-parse PE to find .diag section
+		auto scan_dos = (PIMAGE_DOS_HEADER)dll_image.data();
+		auto scan_nt = (PIMAGE_NT_HEADERS64)(dll_image.data() + scan_dos->e_lfanew);
+		auto scan_sec = IMAGE_FIRST_SECTION(scan_nt);
+		for (WORD si = 0; si < scan_nt->FileHeader.NumberOfSections; si++, scan_sec++)
+		{
+			if (memcmp(scan_sec->Name, ".diag", 5) == 0)
+			{
+				std::uint64_t diag_va = hidden_base_va + scan_sec->VirtualAddress;
+				std::uint64_t diag_size = scan_sec->Misc.VirtualSize;
+				if (diag_size > 0x1000) diag_size = 0x1000;
+
+				std::vector<std::uint8_t> diag_buf(diag_size);
+				hypercall::read_guest_virtual_memory(diag_buf.data(), diag_va, cloned_cr3, diag_size);
+
+				// Check marker
+				std::uint32_t marker = *(std::uint32_t*)diag_buf.data();
+				if (marker == 0xD1A6D1A6)
+				{
+					int phase = *(int*)(diag_buf.data() + 4);
+					int total = *(int*)(diag_buf.data() + 8);
+					int failed_idx = *(int*)(diag_buf.data() + 12);
+					int failed_ret = *(int*)(diag_buf.data() + 16);
+					int last_err = *(int*)(diag_buf.data() + 20);
+					std::uint64_t failed_fn = *(std::uint64_t*)(diag_buf.data() + 24);
+					int* results = (int*)(diag_buf.data() + 32);
+
+					std::println("[DIAG] Phase: {} (1=initterm_e, 2=initterm, 3=DllMain)", phase);
+					std::println("[DIAG] Total initializers: {}", total);
+
+					if (failed_idx >= 0)
+					{
+						std::println("[DIAG] *** FAILED at index {} ***", failed_idx);
+						std::println("[DIAG] Failed fn addr: 0x{:X}", failed_fn);
+						std::println("[DIAG] Failed fn RVA:  0x{:X}", failed_fn - hidden_base_va);
+						std::println("[DIAG] Return value: {}", failed_ret);
+						std::println("[DIAG] GetLastError: {}", last_err);
+					}
+					else if (phase >= 1)
+					{
+						std::println("[DIAG] All {} initializers passed!", total);
+					}
+
+					// Print per-initializer results
+					int max_print = (total < 32) ? total : 32;
+					for (int ri = 0; ri < max_print; ri++)
+					{
+						if (results[ri] == 0)
+							std::println("[DIAG]   [{}] null/skipped", ri);
+						else if (results[ri] == 1)
+							std::println("[DIAG]   [{}] OK", ri);
+						else
+							std::println("[DIAG]   [{}] FAILED (ret={})", ri, -results[ri]);
+					}
+				}
+				else
+				{
+					std::println("[DIAG] Marker not found (got 0x{:X}) — _initterm_e override may not be linked", marker);
+				}
+				break;
+			}
+		}
+	}
+
 	if (dllmain_result)
 	{
 		std::println("[+] Injection complete - DLL running in hidden memory at 0x{:X}", hidden_base_va);

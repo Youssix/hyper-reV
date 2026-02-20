@@ -28,7 +28,8 @@ namespace hypercall
 	std::uint64_t enable_cr3_enforce();
 	std::uint64_t disable_cr3_enforce();
 	std::uint64_t read_mmaf_hit_count();
-	std::uint64_t arm_syscall_hijack(std::uint64_t shellcode_va);
+	std::uint64_t read_slat_violation_count();
+	std::uint64_t arm_syscall_hijack(std::uint64_t shellcode_va, std::uint64_t rip_offset);
 	std::uint64_t disarm_syscall_hijack();
 
 	std::uint64_t add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address);
