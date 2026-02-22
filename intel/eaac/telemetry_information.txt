@@ -1,0 +1,1831 @@
+    [📡] Tag Detected: Detection_Probe 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000003 (3)
+      [🔤] BlobType                  = 0x000000F3 (243)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Type                      = 48
+     
+     
+    [📡] Tag Detected: TelemetryEventType_BackendOptionsTimeout 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000016E (366)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AppliedDynamicOptions 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000013C (316)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] DynamicOptionsValue       = 0xB4C5D6E7F8091234 (13025983748293846580)
+      [🔤] DynamicOptionsArray       = "B4C5D6E7F80912340000000000000000"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_WindowsBuild 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000000 (0)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Build                     = 0x00004A62 (19042)
+      [🔤] SubBuild                  = 0x00000780 (1920)
+      [🔤] Windows11                 = 0x00000000 (0)
+      [🔤] EditionId                 = "Professional"
+      [🔤] IntegrityCheckFailed      = 0
+     
+     
+    [📡] Tag Detected: TelemetryEventType_MachineName 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000E9 (233)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Hash                      = [binary: 16 bytes RE-GENERATED]
+      [🔤] GuidHash                  = [binary: 16 bytes RE-GENERATED]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_FirmwareType 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000011F (287)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Type                      = 0x00000002 (2)
+      [🔤] Success                   = 0x00000001 (1)
+      [🔤] Error                     = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_BootTime 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000014A (330)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] BootTimeYear              = 0x00000000 (0)
+      [🔤] BootTimeMonth             = 0x00000000 (0)
+      [🔤] BootTimeDoW               = 0x00000000 (0)
+      [🔤] BootTimeDay               = 0x00000000 (0)
+      [🔤] BootTimeHour              = 0x00000000 (0)
+      [🔤] BootTimeMinute            = 0x00000000 (0)
+      [🔤] BootTimeSecond            = 0x00000000 (0)
+      [🔤] BootTimeMiliseconds       = 0x00000000 (0)
+      [🔤] BootTimeFileTime          = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_RamGB 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000EA (234)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] MemoryInGigaBytes         = 0x00000010 (16)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_StartupTelemetry 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000C4 (196)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] PipelineId                = "5522119"
+      [🔤] Sha                       = 0x9988776655443322 (11063625725925323554)
+      [🔤] Version                   = "1.1.0000000"
+      [🔤] SystemStartTime           = 0x0000000000000000 (0)
+      [🔤] D3DFeatureLevel           = "FeatureLevelFaild"
+      [🔤] EnableLUA                 = 0x00000001 (1)
+      [🔤] PromptOnSecureDesktop     = 0x00000000 (0)
+      [🔤] ConsentPromptBehaviorAdmin= 0x00000005 (5)
+      [🔤] UACLevel                  = 0x00000003 (3)
+      [🔤] EnableUIADesktopToggle    = 0x00000000 (0)
+      [🔤] ConsentPromptBehaviorUser = 0x00000003 (3)
+      [🔤] EnableInstallerDetection  = 0x00000001 (1)
+      [🔤] ValidateAdminCodeSignatures= 0x00000000 (0)
+      [🔤] EnableSecureUIAPaths      = 0x00000001 (1)
+      [🔤] EnableVirtualization      = 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_HwidTheia 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000184 (388)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] NetworkMAC                = "C0A8010500000000000000000000000000000000000000000000000000000000"
+      [🔤] DiskVolumeSerial          = "2C4D6E8F00000000000000000000000000000000000000000000000000000000"
+      [🔤] TPMPublicKey              = "E1F2A3B4C5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1B2C3D4E5F6A7B8C9D0E1F2"
+      [🔤] BootGUID                  = "99887766554433221100AABBCCDDEEFF00000000000000000000000000000000"
+      [🔤] NVUUID                    = "123456789ABCDEF0123456789ABCDEF000000000000000000000000000000000"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GpuInfo 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000152 (338)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] DeviceString_BusDeviceFunc= "NVIDIA GeForce RTX 2060 B/d/f: 1/0/0"
+      [🔤] DeviceString              = "NVIDIA GeForce RTX 2060"
+      [🔤] DeviceString_BusDeviceFunc= "Microsoft Basic Display Adapter B/d/f: 0/0/0"
+      [🔤] DeviceString              = "Microsoft Basic Display Adapter"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_MotherboardInfo 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000012E (302)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Manufacturer              = "Micro-Star International Co., Ltd."
+      [🔤] Product                   = "B450 TOMAHAWK MAX"
+      [🔤] Version                   = "1.0"
+      [🔤] RegistryManufacturer      = "Micro-Star International Co., Ltd."
+      [🔤] RegistryBaseBoardProduct  = "B450 TOMAHAWK MAX"
+      [🔤] RegistryVersion           = "1.0"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SecureBootEnabled 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000034 (52)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Enabled                   = "true"
+      [🔤] Capable                   = 0x00000001 (1)
+      [🔤] TpmVersion                = 0x00000002 (2)
+      [🔤] TpmStructVersion          = 0x00000001 (1)
+      [🔤] BootPartitionType         = "Gpt"
+      [🔤] RegMatch                  = "yes"
+      [🔤] Uefi                      = 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_CSMType 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000019D (413)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Type                      = 0x00000000 (0)
+      [🔤] Description               = [binary: 48 bytes]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_Probe 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000159 (345)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ModuleInfo 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000BC (188)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] WindowsBuildId            = 0x00004A62 (19042)
+      [🔤] ModuleName                = "ntoskrnl.exe"
+      [🔤] ModuleId                  = "FF8899AABBCCDDE"
+      [🔤] StartAddress              = [error parsing]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_KernelPdbResult 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000001A4 (420)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Result                    = "Success"
+      [🔤] Download                  = 0x00000000 (0)
+      [🔤] ThreadTime                = 0x00000000 (0)
+      [🔤] ModuleId                  = "FF8899AABBCCDDE"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SysFirmwareTables 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000010D (269)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Result                    = 0x00000000 (0)
+      [🔤] Tables                    = [binary: 134 bytes]
+      [🔤] TablesCount               = 0x0000001B (27)
+      [🔤] Table                     = 0x1A2B3C4D (439041101)
+      [🔤] Table                     = 0x5E6F7A8B (1584364171)
+      [🔤] Table                     = 0x9C0D1E2F (2618072623)
+      [🔤] Table                     = 0x3A4B5C6D (978017389)
+      [🔤] Table                     = 0x7E8F9A0B (2123340299)
+      [🔤] Table                     = 0x1C2D3E4F (472727119)
+      [🔤] Table                     = 0x5A6B7C8D (1516993677)
+      [🔤] Table                     = 0x9E0F1A2B (2651789867)
+      [🔤] Table                     = 0x3C4D5E6F (1011686767)
+      [🔤] Table                     = 0x7A8B9C0D (2055973901)
+      [🔤] Table                     = 0x1E2F3A4B (506411595)
+      [🔤] Table                     = 0x5C6D7E8F (1550682255)
+      [🔤] Table                     = 0x9A0B1C2D (2584443949)
+      [🔤] Table                     = 0x3E4F5A6B (1045387883)
+      [🔤] Table                     = 0x7C8D9E0F (2089675279)
+      [🔤] Table                     = 0x1A2B3C4D (439041101)
+      [🔤] Table                     = 0x5E6F7A8B (1584364171)
+      [🔤] Table                     = 0x9C0D1E2F (2618072623)
+      [🔤] Table                     = 0x3A4B5C6D (978017389)
+      [🔤] Table                     = 0x7E8F9A0B (2123340299)
+      [🔤] Table                     = 0x1C2D3E4F (472727119)
+      [🔤] Table                     = 0x5A6B7C8D (1516993677)
+      [🔤] Table                     = 0x9E0F1A2B (2651789867)
+      [🔤] Table                     = 0x3C4D5E6F (1011686767)
+      [🔤] Table                     = 0x7A8B9C0D (2055973901)
+      [🔤] Table                     = 0x1E2F3A4B (506411595)
+      [🔤] Table                     = 0x5C6D7E8F (1550682255)
+      [🔤] LastTable                 = 0xFFFFFFFF (4294967295)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SecurityInformation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000153 (339)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] IommuType                 = "Amd"
+      [🔤] Hvci                      = 0x0000000000000000 (0)
+      [🔤] KernelDmaProtection       = 0x0000000000000000 (0)
+      [🔤] KvaShadowingEnabled       = 0x00000000 (0)
+      [🔤] SecurebootEnabled         = 1
+      [🔤] SecurebootCapable         = 1
+      [🔤] DmaProtectionsAvailable   = 0x00000001 (1)
+      [🔤] DmaProtectionsInUse       = 0x00000000 (0)
+      [🔤] HardwareMbecAvailable     = 0x00000001 (1)
+      [🔤] ApicVirtualizationAvailable= 0x00000001 (1)
+      [🔤] CetCapable                = 0x00000000 (0)
+      [🔤] UserCetAllowed            = 0x00000000 (0)
+      [🔤] KernelCetEnabled          = "false"
+      [🔤] SecureKernelRunning       = "false"
+      [🔤] HvciEnabled               = "false"
+      [🔤] FirmwarePageProtection    = 0x00000000 (0)
+      [🔤] HvptEnabled               = "false"
+      [🔤] HypervisorConnected       = 0x00000000 (0)
+      [🔤] HypervisorPresent         = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SlowDriverManagerInitCall 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000100 (256)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Stage                     = "loadDriverImage"
+      [🔤] TimeMs                    = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SlowServiceInitFuncMs 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000FC (252)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] Stage                     = 0x99887766 (2575857510)
+      [🔤] Index                     = 0x00000009 (9)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ServiceReadyMs 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000FB (251)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] Stage                     = 0x123456789ABC0000 (1311768467294896128)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_CpuIdInfo 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000155 (341)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Vendor                    = "AuthenticAMD"
+      [🔤] ExtendedModel             = 0x00000006 (6)
+      [🔤] BaseFamily                = 0x0000000F (15)
+      [🔤] ExtendedFamily            = 0x0000000A (10)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ServiceReadyMs 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000FB (251)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] Stage                     = "preperformPreLaunch"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_HwidUefiVars 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000001A2 (418)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Hash0                     = [binary: 20 bytes RE-GENERATED]
+      [🔤] Hash1                     = [binary: 20 bytes RE-GENERATED]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_PatchGuardCheck 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000139 (313)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Result                    = 0x00000001 (1)
+      [🔤] Type                      = "GlobalContext"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_TPM 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000122 (290)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TPMType                   = 0x00000002 (2)
+      [🔤] OEMId                     = "AMD_INC"
+      [🔤] OEMTableId                = "A M D "
+      [🔤] StartMethod               = 0x00000002 (2)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ServiceReadyMs 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000FB (251)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] Stage                     = "preperformPreLaunch_configureKernelDriver_done"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_BitBltProcess 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000108 (264)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001234 (4660)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] SignatureResult           = 0x00000001 (1)
+      [🔤] HasPath                   = 1
+     
+     
+    [📡] Tag Detected: TelemetryEventType_HandleClosedStatistics 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000053 (83)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Data                      = [binary: 62 bytes RE-GENERATED]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SpectreImportOptimization 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000006D (109)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameDataFileChecksum 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000134 (308)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] GameDataFilePath          = "c:\program files\ea games\battlefield 6 event\Data\layout.toc"
+      [🔤] Checksum0                 = [error parsing]
+      [🔤] Checksum1                 = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ServiceReadyMs 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000FB (251)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] Stage                     = "postprelaunch"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ServiceReadyMs 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000FB (251)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] Stage                     = "notifyServiceAsReady"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameAckSinceServiceRunning 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000F7 (247)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] NotificationType          = "Process"
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001F00 (7936)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameAckSinceServiceRunning 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000F7 (247)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] NotificationType          = "Thread"
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameModuleRange 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000015A (346)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Start                     = 0x0000000099000000 (2566914048)
+      [🔤] End                       = 0x00000000A5000000 (2768240640)
+      [🔤] Size                      = 0x000000000C000000 (201326592)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_InfinityHookSetupResult 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000010A (266)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] WindowsBuildId            = 0x0000586B (22635)
+      [🔤] WindowsSubBuild           = 0x00000FA0 (4000)
+      [🔤] Status                    = "Success"
+      [🔤] ErrorType                 = 0x00000000 (0)
+      [🔤] AlternativeEventData      = 0x00000001 (1)
+      [🔤] AlternativeSyscallDistance= 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameAckSinceServiceRunning 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000F7 (247)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] NotificationType          = "Process"
+      [🔤] TimeMs                    = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001F00 (7936)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GuardedRegionsSetupResult 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000102 (258)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] WindowsBuildId            = 0x0000586B (22635)
+      [🔤] ErrorType                 = 0x00000000 (0)
+      [🔤] Status                    = "Success"
+      [🔤] Pcid                      = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GuardedRegionStats 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000105 (261)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Active                    = 1
+      [🔤] SupportedByInfinityHook   = 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_Casper 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000E5 (229)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] SupportsWhiteboxEncryption= 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameBridgeConnectionTimeSinceStart 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000F6 (246)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_KernelTrap 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000110 (272)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] FlagResult                = 0x00000006 (6)
+      [🔤] trapResult                = 0x00000000 (0)
+      [🔤] halQcResult               = 0x00000006 (6)
+      [🔤] QueryCounterAddress       = [error parsing]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameBridgeModuleRangeTimeSinceStart 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000012F (303)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] TimeMs                    = 0x00000000 (0)
+      [🔤] TrampolineSize            = 0x000001B4 (436)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SectionMapping 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000008B (139)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00002130 (8496)
+      [🔤] ProcessName               = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] SectionName               = "\BaseNamedObjects\__ComCatalogCache__"
+      [🔤] SizeKB                    = 0x00000004 (4)
+      [🔤] Flags                     = 0x00000003 (3)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SectionMapping 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000008B (139)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00002130 (8496)
+      [🔤] ProcessName               = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] SectionName               = "\BaseNamedObjects\__ComCatalogCache__"
+      [🔤] SizeKB                    = 0x00000004 (4)
+      [🔤] Flags                     = 0x00000003 (3)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SectionMapping 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000008B (139)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00002130 (8496)
+      [🔤] ProcessName               = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] SectionName               = "\Sessions\1\BaseNamedObjects\windows_shell_global_counters"
+      [🔤] SizeKB                    = 0x00000004 (4)
+      [🔤] Flags                     = 0x00000003 (3)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SectionMapping 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000008B (139)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00002130 (8496)
+      [🔤] ProcessName               = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] SectionName               = "\BaseNamedObjects\windows_shell_global_counters"
+      [🔤] SizeKB                    = 0x00000004 (4)
+      [🔤] Flags                     = 0x00000003 (3)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_CpuInfo 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000F1 (241)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Name                      = "AMD Ryzen 5 3600 6-Core Processor              "
+      [🔤] NumberOfLogicalProcessors = 0x0000000C (12)
+      [🔤] MaxClockSpeed             = 0x00000E10 (3600)
+      [🔤] Family                    = 0x00000017 (23)
+      [🔤] IsIntel                   = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameThreadThresholdExceeded 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000018E (398)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] UpTimeSecs                = 0x00000002 (2)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\driverstore\filerepository\nv_dispi.inf_amd64_5678\nvwgf2umx.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "ntdll.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001004 (4100)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001008 (4104)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x0000100C (4108)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001010 (4112)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\nvapi64.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "nvwgf2umx.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001014 (4116)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_UniversalSerialBusTopologyStatistics 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000013A (314)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Devices                   = 0x0000000000000042 (66)
+      [🔤] Anomalies                 = 0x0000000000000000 (0)
+      [🔤] ElapsedMs                 = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001018 (4120)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_UniversalSerialBusResult 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000013B (315)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Error                     = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x0000101C (4124)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_HwidMonitorEdid 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000013D (317)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] DataSuccess               = 1
+      [🔤] DataStatus                = 0x00000000 (0)
+      [🔤] DataSize                  = 0x00000080 (128)
+      [🔤] DataEdid                  = [binary: 128 bytes]
+      [🔤] ContextSuccess            = 1
+      [🔤] ContextStatus             = 0x00000000 (0)
+      [🔤] ContextSize               = 0x00000080 (128)
+      [🔤] ContextEdid               = [binary: 128 bytes]
+      [🔤] SetupSuccess              = 1
+      [🔤] SetupStatus               = 0x00000000 (0)
+      [🔤] SetupSize                 = 0x00000080 (128)
+      [🔤] SetupEdid                 = [binary: 128 bytes]
+      [🔤] RegistrySuccess           = 1
+      [🔤] RegistryStatus            = 0x00000000 (0)
+      [🔤] RegistryElements          = 0x00000001 (1)
+      [🔤] RegistryDataEdidMatched   = 1
+      [🔤] RegistryContextEdidMatched= 1
+      [🔤] ContextDataEdidMatched    = 1
+      [🔤] RegistryMonitorNames      = "SAM0E12"
+      [🔤] RegistryMonitorNames      = "Default_Monitor"
+      [🔤] Hwid                      = [binary: 128 bytes]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001020 (4128)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_CloudGaming 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000169 (361)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] IsGfn                     = 0
+      [🔤] IsGfnAttested             = 0
+      [🔤] IsGfnMatchedPipe          = 0
+      [🔤] IsGfnException            = 0
+      [🔤] IsGfnPipeCount            = 0x0000000000000078 (120)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001024 (4132)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_HypervisorDetectionData 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000011 (17)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] advancedDetectionRan      = 0x65757274 (1702195828)
+      [🔤] cpuidVmDetected           = "false"
+      [🔤] eptHookVmDetected         = "false"
+      [🔤] queryVmDetected           = "false"
+      [🔤] lbrDetected               = "false"
+      [🔤] lbrFiltered               = "false"
+      [🔤] rdtsc_available           = 0x00000002 (2)
+      [🔤] invalidMsrSucceeded       = "false"
+      [🔤] vmCounterResult           = 0x000001B0 (432)
+      [🔤] vmCounterBaseLine         = 0x00000050 (80)
+      [🔤] cr3Cycles                 = 0x00000000000006A0 (1696)
+      [🔤] rdtscDeltaBaseLine        = 0x0000000000000190 (400)
+      [🔤] rdtscThreadDeltaBaseLine  = 0x0000000000000001 (1)
+      [🔤] rdtscDeltaVmCounter       = 0x0000000000000280 (640)
+      [🔤] rdtscThreadDeltaVmCounter = 0x0000000000000278 (632)
+      [🔤] aperfCyclesResult         = 0x00000190 (400)
+      [🔤] lazyHypervisorResult      = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001028 (4136)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x0000102C (4140)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001030 (4144)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001034 (4148)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\nvapi64.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "nvwgf2umx.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\vulkan-1.dll"
+      [🔤] ModuleSignerName          = "LunarG, Inc."
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "nvapi64.dll"
+     
+     
+    [📡] Tag Detected: Detection_RevokedDriver 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000003 (3)
+      [🔤] BlobType                  = 0x00000026 (38)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] DriverName                = "c:\windows\system32\drivers\condrv.sys"
+      [🔤] DriverSignerName          = "Microsoft Windows Hardware Compatibility Publisher"
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001038 (4152)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x0000103C (4156)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001040 (4160)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_AllowedChildProcessCreation 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000111 (273)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00001044 (4164)
+      [🔤] ProcessName               = "c:\windows\system32\svchost.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\program files\ea games\battlefield 6 event\sl.nis.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "nvwgf2umx.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\driverstore\filerepository\nv_dispi.inf_amd64_5678\nvapi64.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "sl.reflex.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\driverstore\filerepository\nv_dispi.inf_amd64_5678\nvwgf2umx.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "nvapi64.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\driverstore\filerepository\nv_dispi.inf_amd64_5678\nvldumdx.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "d3d12core.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\driverstore\filerepository\nv_dispi.inf_amd64_5678\nvapi64.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "nvldumdx.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\driverstore\filerepository\nv_dispi.inf_amd64_5678\nvwgf2umx.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "nvwgf2umx.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonAllowlistedSignedImageLoadGame 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000003 (3)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ModuleName                = "c:\windows\system32\driverstore\filerepository\nv_dispi.inf_amd64_5678\nvwgf2umx.dll"
+      [🔤] ModuleSignerName          = "NVIDIA Corporation"
+      [🔤] IsMinifilterCallback      = 0x00000001 (1)
+      [🔤] PreviousModule            = "d3d9.dll"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GpuHwid 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000151 (337)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] D3D9Hash                  = [binary: 20 bytes RE-GENERATED]
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ForegroundWindow 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000146 (326)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] window_HWND               = 0x000000000008AE12 (568850)
+      [🔤] window_RectLeft           = 0x00000010 (16)
+      [🔤] window_RectTop            = 0x00000010 (16)
+      [🔤] window_RectRight          = 0x00000400 (1024)
+      [🔤] window_RectBottom         = 0x00000300 (768)
+      [🔤] window_Title              = "Explorer"
+      [🔤] window_ClassName          = "CabinetWClass"
+      [🔤] window_ProcessId          = 0x00001458 (5208)
+      [🔤] window_ThreadId           = 0x000019C4 (6596)
+      [🔤] window_ExtendedStyles     = 0x00000000 (0)
+      [🔤] window_Styles             = 0x14CF0000 (349110272)
+      [🔤] window_DisplayAffinity    = 0x00000000 (0)
+      [🔤] window_LayeredAttributesColorKey= 0x00000000 (0)
+      [🔤] window_LayeredAttributesAlpha= 0x00000000 (0)
+      [🔤] window_LayeredAttributesFlags= 0x00000000 (0)
+      [🔤] process_PID               = 0x00001458 (5208)
+      [🔤] process_ProcessName       = "c:\windows\explorer.exe"
+      [🔤] process_SignerName        = "Microsoft Windows"
+      [🔤] process_SignatureVerificationResult= 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonSystemDirectoryUnloadedDriverPiDdbEntry 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000003A (58)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] DriverName                = "volmgr.sys"
+      [🔤] TimeDateStamp             = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_EventLogNonExistingDriver 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000000E (14)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] DriverName                = "\device\harddiskvolume3\windows\system32\drivers\BEDaisy.sys" // 0 IQ BASTIAN? Thanks for banning me, anticheat gold standard for a reason
+      [🔤] NoMatchingImageBase       = 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_OoaTimeout 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000015D (349)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Activation64.dll_Loaded   = 0x00000001 (1)
+      [🔤] SecondsSinceGameStart     = 0x000002A0 (672)
+      [🔤] OoaUnwrappingDone         = 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameTextSegmentChecksum 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000007D (125)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Checksum                  = 0xF1E2D3C4 (4058141636)
+     
+     
+     
+     
+    [📡] Tag Detected: TelemetryEventType_RuntimePatchGuardResult 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000017B (379)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] WindowsBuildId            = 0x0000586B (22635)
+      [🔤] Result                    = 0x00000000 (0)
+      [🔤] MaxTimerNodeDepth         = 0x0000000000000020 (32)
+      [🔤] UpTimeSecs                = 0x00000000 (0)
+      [🔤] Type                      = "KiDpcDispatchDpc"
+      [🔤] Type                      = "ManuallyMappedWorkerThread"
+      [🔤] DueTimeSecs               = 0x00000000 (0)
+     
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GameVehHandler 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000068 (104)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] OutsideAnyGameModule      = 1
+      [🔤] Address                   = 0x0000000021553AF10
+     
+     
+    [📡] Tag Detected: TelemetryEventType_CuteHookSetup 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000183 (387)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Result                    = 0x00000003 (3)
+      [🔤] WindowsBuildId            = 0x0000586B (22635)
+      [🔤] WindowsSubBuild           = 0x00000FA0 (4000)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_FoundInstrumentationCallback 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000D5 (213)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Address                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00000404 (1028)
+      [🔤] SignatureResult           = 0x00000005 (5)
+      [🔤] ModuleBaseAddress         = 0x0000000000000000 (0)
+      [🔤] IsService                 = 0x00000001 (1)
+      [🔤] CallbackVA                = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GuardedRegionInitialReport 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000167 (359)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] PageFaultCount            = 0x0000001D (29)
+      [🔤] InitialRequestGameAddress = 0x000000014B2F549E (5556360350)
+      [🔤] PageCount                 = 0x00000002 (2)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_SignatureVerificationError 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000EE (238)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ErrorCode                 = 0x800B0100 (2148204800)
+      [🔤] ModuleName                = "c:\program files\windowsapps\microsoft.widgetsplatformruntime_2.5.1.0_x64__8wekyb3d8bbwe\widgetservice\widgetservice.exe"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ProcessList 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000158 (344)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] PID                       = 0x0000085C (2140)
+      [🔤] Name                      = "\Device\HarddiskVolume3\Program Files (x86)\Spotify\Spotify.exe"
+      [🔤] MemoryUsage               = 0x00000000041A2000 (68820992)
+      [🔤] ThreadCount               = 0x0000014D (333)
+      [🔤] StartTime                 = 0x0000000000000000 (0)
+      [🔤] UserTime                  = 0x0000000000000000 (0)
+      [🔤] KernelTime                = 0x0000000000000000 (0)
+      [🔤] ProcessActivity           = 0x0000000000000031 (49)
+      [🔤] CurrentTime               = 0x0000000000000000 (0)
+      [🔤] ProcessPath               = "c:\program files (x86)\spotify\spotify.exe"
+      [🔤] SignerName                = "Spotify AB"
+      [🔤] SignatureVerificationResult= 0x00000000 (0)
+      [🔤] FileExists                = 1
+      [🔤] PdbExists                 = 0
+      [🔤] DebugSignature            = 0x53445352 (1396986706)
+      [🔤] FileSize                  = 0x0000000000782A1B (7875099)
+      [🔤] Checksum                  = 0x006A2B3C (6957884)
+      [🔤] DebugTimeDateStamp        = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ProcessList 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000158 (344)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] PID                       = 0x00000C12 (3090)
+      [🔤] Name                      = "\Device\HarddiskVolume3\Windows\System32\svchost.exe"
+      [🔤] MemoryUsage               = 0x0000000000F42000 (15998976)
+      [🔤] ThreadCount               = 0x0000002A (42)
+      [🔤] StartTime                 = 0x0000000000000000 (0)
+      [🔤] UserTime                  = 0x0000000000000000 (0)
+      [🔤] KernelTime                = 0x0000000000000000 (0)
+      [🔤] ProcessActivity           = 0x0000000000000015 (21)
+      [🔤] CurrentTime               = 0x0000000000000000 (0)
+      [🔤] ProcessPath               = "c:\windows\system32\svchost.exe"
+      [🔤] SignatureVerificationResult= 0x00000001 (1)
+      [🔤] FileExists                = 1
+      [🔤] PdbExists                 = 0
+      [🔤] DebugSignature            = 0x53445352 (1396986706)
+      [🔤] GPdbPath                  = "C:\Builds\Release\System\svchost.pdb"
+      [🔤] FileSize                  = 0x000000000000D000 (53248)
+      [🔤] Checksum                  = 0x00000000 (0)
+      [🔤] DebugGuid                 = "{ABCDEF01-2345-6789-ABCD-EF0123456789}"
+      [🔤] DebugTimeDateStamp        = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ProcessList 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000158 (344)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] PID                       = 0x00002130 (8496)
+      [🔤] Name                      = "\Device\HarddiskVolume3\Program Files\Google\Chrome\Application\chrome.exe"
+      [🔤] MemoryUsage               = 0x0000000012A30000 (312672256)
+      [🔤] ThreadCount               = 0x0000018E (398)
+      [🔤] StartTime                 = 0x0000000000000000 (0)
+      [🔤] UserTime                  = 0x0000000000000000 (0)
+      [🔤] KernelTime                = 0x0000000000000000 (0)
+      [🔤] ProcessActivity           = 0x000000000001B465 (111717)
+      [🔤] CurrentTime               = 0x0000000000000000 (0)
+      [🔤] ProcessPath               = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] SignatureVerificationResult= 0x00000001 (1)
+      [🔤] FileExists                = 1
+      [🔤] PdbExists                 = 0
+      [🔤] DebugSignature            = 0x53445352 (1396986706)
+      [🔤] FileSize                  = 0x00000000002F4A00 (3099136)
+      [🔤] Checksum                  = 0x00000000 (0)
+      [🔤] DebugTimeDateStamp        = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_NonIntegerActiveDriverIoProcess 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000095 (149)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ProcessId                 = 0x00002130 (8496)
+      [🔤] ProcessName               = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] Result                    = 0x00000006 (6)
+      [🔤] UnsignedDll0              = "c:\program files\google\chrome\application\chrome.exe"
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ForegroundWindow 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000146 (326)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] window_HWND               = 0x000000000005C8A2 (379042)
+      [🔤] window_RectLeft           = 0x00000000 (0)
+      [🔤] window_RectTop            = 0x00000000 (0)
+      [🔤] window_RectRight          = 0x00000780 (1920)
+      [🔤] window_RectBottom         = 0x00000438 (1080)
+      [🔤] window_Title              = "Chrome"
+      [🔤] window_ClassName          = "Chrome_WidgetWin_1"
+      [🔤] window_ProcessId          = 0x00002130 (8496)
+      [🔤] window_ThreadId           = 0x00001A20 (6688)
+      [🔤] window_ExtendedStyles     = 0x00000100 (256)
+      [🔤] window_Styles             = 0x16CF0000 (382664704)
+      [🔤] window_DisplayAffinity    = 0x00000000 (0)
+      [🔤] window_LayeredAttributesColorKey= 0x00000000 (0)
+      [🔤] window_LayeredAttributesAlpha= 0x00000000 (0)
+      [🔤] window_LayeredAttributesFlags= 0x00000000 (0)
+      [🔤] process_PID               = 0x00002130 (8496)
+      [🔤] process_ProcessName       = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] process_SignatureVerificationResult= 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_PciTreeScanResult 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000D7 (215)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Flags                     = 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_PcieHwid 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000000D8 (216)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Desc                      = "NVIDIA GeForce RTX 2060"
+      [🔤] Manufacturer              = "NVIDIA"
+      [🔤] Hash                      = [binary: 20 bytes]
+      [🔤] VendorId                  = 0x000010DE (4318)
+      [🔤] DeviceId                  = 0x00001F08 (7944)
+      [🔤] SubsystemVendorId         = 0x00001462 (5218)
+      [🔤] SubsystemId               = 0x00003755 (14165)
+     
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ReadStartOpCodeFailure 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000007C (124)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ThreadId                  = 0x00000E88 (3720)
+      [🔤] Address                   = [error parsing]
+      [🔤] OpCodes                   = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ReadStartOpCodeFailure 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000007C (124)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ThreadId                  = 0x00001B05 (6917)
+      [🔤] Address                   = [error parsing]
+      [🔤] OpCodes                   = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ReadStartOpCodeFailure 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000007C (124)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] ThreadId                  = 0x00001F00 (7936)
+      [🔤] Address                   = [error parsing]
+      [🔤] OpCodes                   = 0x0000000000000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ForegroundWindow 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000146 (326)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] window_HWND               = 0x00000000000A2C10 (666640)
+      [🔤] window_RectLeft           = 0x00000080 (128)
+      [🔤] window_RectTop            = 0x00000080 (128)
+      [🔤] window_RectRight          = 0x00000580 (1408)
+      [🔤] window_RectBottom         = 0x00000380 (896)
+      [🔤] window_Title              = "Steam"
+      [🔤] window_ClassName          = "USurface_12345"
+      [🔤] window_ProcessId          = 0x00001404 (5124)
+      [🔤] window_ThreadId           = 0x000019A0 (6560)
+      [🔤] window_ExtendedStyles     = 0x00000000 (0)
+      [🔤] window_Styles             = 0x04C70000 (80150528)
+      [🔤] window_DisplayAffinity    = 0x00000000 (0)
+      [🔤] window_LayeredAttributesColorKey= 0x00000000 (0)
+      [🔤] window_LayeredAttributesAlpha= 0x00000000 (0)
+      [🔤] window_LayeredAttributesFlags= 0x00000000 (0)
+      [🔤] process_PID               = 0x00001404 (5124)
+      [🔤] process_ProcessName       = "c:\program files\steam\steam.exe"
+      [🔤] process_SignerName        = "Valve Corp."
+      [🔤] process_SignatureVerificationResult= 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GuardedRegionInitialAllowlistThreadCount 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x0000016B (363)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] WindowsBuildId            = 0x0000586B (22635)
+      [🔤] Count                     = 0x0000001D (29)
+      [🔤] BlockCount                = 0x00000002 (2)
+      [🔤] UpTimeSecs                = 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: Detection_OverlayWindow 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000003 (3)
+      [🔤] BlobType                  = 0x000000EF (239)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] overlapPercentage         = 0x00000064 (100)
+      [🔤] zDifference               = 0x00000000 (0)
+      [🔤] isAboveGameWindow         = 0
+      [🔤] hasTopmostFlag            = 1
+      [🔤] hasLayeredFlag            = 1
+      [🔤] hasExcludeFromCaptureFlag = 0
+      [🔤] hasTransparentFlag        = 1
+      [🔤] window_HWND               = 0x0000000000072B1C (469788)
+      [🔤] window_RectLeft           = 0x00000008 (8)
+      [🔤] window_RectTop            = 0x0000001F (31)
+      [🔤] window_RectRight          = 0x00000508 (1288)
+      [🔤] window_RectBottom         = 0x000002EF (751)
+      [🔤] window_Title              = "Steam Overlay"
+      [🔤] window_ClassName          = "GameOverlay_123"
+      [🔤] window_ProcessId          = 0x00001404 (5124)
+      [🔤] window_ThreadId           = 0x000019A0 (6560)
+      [🔤] window_ExtendedStyles     = 0x00000000 (0)
+      [🔤] window_Styles             = 0x14030000 (335740928)
+      [🔤] window_DisplayAffinity    = 0x00000000 (0)
+      [🔤] window_LayeredAttributesColorKey= 0x00000000 (0)
+      [🔤] window_LayeredAttributesAlpha= 0x00000000 (0)
+      [🔤] window_LayeredAttributesFlags= 0x00000000 (0)
+      [🔤] gameWindow_HWND           = 0x000000000018035E (1573726)
+      [🔤] gameWindow_RectLeft       = 0x00000000 (0)
+      [🔤] gameWindow_RectTop        = 0x00000000 (0)
+      [🔤] gameWindow_RectRight      = 0x00000510 (1296)
+      [🔤] gameWindow_RectBottom     = 0x000002F7 (759)
+      [🔤] gameWindow_ClassName      = "Battlefield 6 Open Beta"
+      [🔤] gameWindow_ProcessId      = 0x00001404 (5124)
+      [🔤] gameWindow_ThreadId       = 0x00000E88 (3720)
+      [🔤] gameWindow_ExtendedStyles = 0x00000000 (0)
+      [🔤] gameWindow_Styles         = 0x14CF0000 (349110272)
+      [🔤] gameWindow_DisplayAffinity= 0x00000000 (0)
+      [🔤] gameWindow_LayeredAttributesColorKey= 0x00000000 (0)
+      [🔤] gameWindow_LayeredAttributesAlpha= 0x00000000 (0)
+      [🔤] gameWindow_LayeredAttributesFlags= 0x00000000 (0)
+      [🔤] process_PID               = 0x00001404 (5124)
+      [🔤] process_ProcessName       = "c:\program files\steam\steam.exe"
+      [🔤] process_SignerName        = "Valve Corp."
+      [🔤] process_SignatureVerificationResult= 0x00000000 (0)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_ForegroundWindow 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000146 (326)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] window_HWND               = 0x000000000005C8A2 (379042)
+      [🔤] window_RectLeft           = 0x00000000 (0)
+      [🔤] window_RectTop            = 0x00000000 (0)
+      [🔤] window_RectRight          = 0x00000780 (1920)
+      [🔤] window_RectBottom         = 0x00000438 (1080)
+      [🔤] window_Title              = "Chrome"
+      [🔤] window_ClassName          = "Window"
+      [🔤] window_ProcessId          = 0x00002130 (8496)
+      [🔤] window_ThreadId           = 0x00001A20 (6688)
+      [🔤] window_ExtendedStyles     = 0x00000000 (0)
+      [🔤] window_Styles             = 0x16CF0000 (382664704)
+      [🔤] window_DisplayAffinity    = 0x00000000 (0)
+      [🔤] window_LayeredAttributesColorKey= 0x00000000 (0)
+      [🔤] window_LayeredAttributesAlpha= 0x00000000 (0)
+      [🔤] window_LayeredAttributesFlags= 0x00000000 (0)
+      [🔤] process_PID               = 0x00002130 (8496)
+      [🔤] process_ProcessName       = "c:\program files\google\chrome\application\chrome.exe"
+      [🔤] process_SignatureVerificationResult= 0x00000001 (1)
+     
+     
+    [📡] Tag Detected: TelemetryEventType_GuardedRegionSwapCount 
+    [📍] Dumping: 0x00000000000 → 0x00000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000190 (400)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Count                     = 0x000000000024034A
+      [🔤] UpTimeSecs                = 0x00000000 (0)
+     
+    [📡] Tag Detected: Detection_CuteHookManuallyMappedPageFaulted 
+    [📍] Dumping: 0x00007FF4A100 → 0x00007FF4AD00
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000003 (3)
+      [🔤] BlobType                  = 0x00000107 (263)
+      [🔤] TickCount                 = 0x0000000000000000 (0)
+      [🔤] BuildId                   = 0x0000000000000000 (0)
+      [🔤] Address                   = [error parsing]
+      [🔤] AddressAligned            = [error parsing]
+      [🔤] RvaIp                     = 0x0000000000001240 (4672)
+      [🔤] ProcessId                 = 0x00001844 (6212)
+      [🔤] AttachedProcessId         = 0x0000000000001844 (6212)
+      [🔤] ThreadId                  = 0x000021A0 (8608)
+      [🔤] HookedPages               = 0x000008F2 (2290)
+      [🔤] TotalFaults               = 0x0000011C (284)
+      [🔤] ProcessName               = "c:\windows\explorer.exe"
+      [🔤] ProcessSignerName         = "Microsoft Windows"
+      [🔤] IsSigned                  = 1
+      [🔤] IsSignedByMs              = 1
+      [🔤] HasPath                   = 1
+      [🔤] AttachedProcessName       = "c:\windows\explorer.exe"
+      [🔤] AttachedProcessSignerName = "Microsoft Windows"
+      [🔤] AttachedIsSigned          = 1
+      [🔤] AttachedIsSignedByMs      = 1
+      [🔤] AttachedHasPath           = 1
+      [🔤] DumpResult                = 0x00000000 (0)
+      [🔤] CuteHook                  = [binary: 32 bytes]
+      [🔤] AnalyzeResult             = 0x00000000 (0)
+      [🔤] MetricsSize               = 0x0000000000001000 (4096)
+      [🔤] MetricsZeroCount          = 0x00000000000001A2 (418)
+      [🔤] MetricsZeroRelative       = 0x5028CC1100000000 (5776041235654311936)
+      [🔤] MetricsNopCount           = 0x0000000000000014 (20)
+      [🔤] MetricsNopRelative        = 0x41E2400000000000 (4747372692694106112)
+      [🔤] MetricsInt3Count          = 0x000000000000008E (142)
+      [🔤] MetricsInt3Relative       = 0x4115F70000000000 (4689895232467369984)
+      [🔤] MetricsQuarterHash1       = 0x00000000A1B2C3D4 (2712847316)
+      [🔤] MetricsQuarterHash2       = 0x00000000E5F6A7B8 (3858179000)
+      [🔤] MetricsQuarterHash3       = 0x0000000012345678 (305419896)
+      [🔤] MetricsQuarterHash4       = 0x0000000090ABCDEF (2427178479)
+      [🔤] MetricsRelocHash          = [error parsing]
+      [🔤] MetricsInstructionHash    = [error parsing]
+      [🔤] MetricsRelocInstructionHash= [error parsing]
+      [🔤] MetricsOpcodeHash         = [error parsing]
+      [🔤] MetricsSimHash            = 0x0000000000000000 (0)
+      [🔤] MetricsMinHash1           = 0x001166D7EF25C3CF (4895627889361871)
+      [🔤] MetricsMinHash2           = 0x00225CB5E1598AD3 (9666754382631503)
+      [🔤] MetricsMinHash3           = 0x0033BD0A8E5F9B89 (14562479673895945)
+      [🔤] MetricsMinHash4           = 0x00562C11DA9A7635 (24256874697341235)
+      [🔤] MetricsEntropyTotal       = 0x401E1E2C87FDE500 (4620098971037562880)
+      [🔤] MetricsQuarterEntropy1    = 0x4018C84F9426DD00 (4618727123992100864)
+      [🔤] MetricsQuarterEntropy2    = 0x40197AF5BBDCB100 (4619037325656518656)
+      [🔤] MetricsQuarterEntropy3    = 0x401A9B9D3A762900 (4619289269785800960)
+      [🔤] MetricsQuarterEntropy4    = 0x401D6C5E09C0F500 (4619934524494200832)
+      [🔤] MetricsChiSquare          = 0x41D4EB8100000000 (4743621453272973312)
+      [🔤] MetricsindexCoincidencePercent= 0x4006890010020000 (4613524584674689024)
+      [🔤] MetricsMinEntropy         = 0x40115D0EF4896500 (4616573752538801408)
+      [🔤] MetricsLzPhraseCount      = 0x0000000000000CBB (3259)
+      [🔤] MetricsUniqueBigramCount  = 0xFFFFFE21 (4294966817)
+      [🔤] MetricsUniqueTrigramCount = 0x00000D44 (3396)
+      [🔤] MetricsInstructionCount   = 0x00000000 (0)
+      [🔤] MetricsMovCount           = 0x00000000 (0)
+      [🔤] MetricsCallCount          = 0x00000000 (0)
+      [🔤] MetricsJmpCount           = 0x00000000 (0)
+      [🔤] MetricsJccCount           = 0x00000000 (0)
+      [🔤] MetricsRetCount           = 0x00000000 (0)
+      [🔤] MetricsLongestNopRun      = 0x0000000000000002 (2)
+      [🔤] MetricsSignatureResult    = 0x00000004 (4)
+      [🔤] SystemVaType              = 0x00000008 (8)
+      [🔤] StackDump                 = "stack[0]: 0xfffff8054a1258aa: ntoskrnl.exe + 0x1258aa (KiPageFault + 0x410)"
+      [🔤] StackDump                 = "stack[2]: 0xfffff8054a1258aa: ntoskrnl.exe + 0x1258aa (KiPageFault + 0x410)"
+      [🔤] StackDump                 = "stack[4]: 0xfffff8054a3f12bb: ntoskrnl.exe + 0x3f12bb (EtwpTraceLastBranchRecord + 0x122)"
+      [🔤] StackDump                 = "stack[15]: 0xfffff8054a3f05cc: ntoskrnl.exe + 0x3f05cc (EtwpReserveTraceBuffer + 0x280)"
+      [🔤] StackDump                 = "stack[17]: 0xfffff8054a912a44: ntoskrnl.exe + 0x912a44 (NtWaitForSingleObject)"
+      [🔤] StackDump                 = "stack[29]: 0xfffff8054a441dd1: ntoskrnl.exe + 0x441dd1 (EtwpLogKernelEvent + 0xb21)"
+
+
+          [📡] Tag Detected: TelemetryEventType_GpuHwid 
+    [📍] Dumping: 0 → 0
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000151 (337)
+      [🔤] TickCount                 = 0x000000000000
+      [🔤] BuildId                   = 0x00000000000000
+      [🔤] D3D9Hash                  = [binary: 20 bytes]
+      [🔤] D3DKmtHash                = [binary: 20 bytes]
+      [🔤] PassedSpooferTest         = 0x00000001 (1)
+
+Did you guys passed spoofer test?
+
+
+Code:
+
+    [📡] Tag Detected: TelemetryEventType_PTResult 
+    [📍] Dumping: 0000000000 → 000000000000
+     
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x00000084 (132)
+      [🔤] TickCount                 = 0x0000000000
+      [🔤] BuildId                   = 0x000000000000
+      [🔤] ErrorType                 = 0x0000000C (12)
+      [🔤] PtType                    = 0x00000000 (0)
+      [🔤] Cpu                       = "AMD Ryzen 9 7950X3D 16-Core Processor"
+      [🔤] WindowsBuildId = 0x00005867 (22631)
+      [🔤] Type                      = "Amd"
+
+Code:
+
+    [📡] Tag Detected: TelemetryEventType_HwidDiskSerials 
+    [📍] Dumping: 0000000 → 0000000
+    [📦] Decoded Packet Struct:
+      [🔤] BlobMode                  = 0x00000001 (1)
+      [🔤] BlobType                  = 0x000001A3 (419)
+      [🔤] TickCount                 = 0x0000000000
+      [🔤] BuildId                   = 0x000000000000
+      [🔤] WSuc                      = 1
+      [🔤] WStat                     = 0x0000000C (12)
+      [🔤] WHS                       = [binary: 20 bytes]
+      [🔤] PMSuc                     = 1
+      [🔤] PMStat                    = 0x0000000C (12)
+      [🔤] KHS                       = [binary: 20 bytes]
+      [🔤] RPSuc                     = 1
+      [🔤] RPStat                    = 0x0000000C (12)
+

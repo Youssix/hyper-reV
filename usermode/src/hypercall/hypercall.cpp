@@ -180,6 +180,51 @@ std::uint64_t hypercall::disarm_syscall_hijack()
 	return make_hypercall(hypercall_type_t::read_guest_cr3, 9, 0, 0, 0);
 }
 
+std::uint64_t hypercall::read_hijack_cpuid_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 12, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_hijack_claimed_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 13, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_hijack_armed_state()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 14, 0, 0, 0);
+}
+
+std::uint64_t hypercall::set_diag_watch_pfn(std::uint64_t pfn)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 15, pfn, 0, 0);
+}
+
+std::uint64_t hypercall::read_diag_watch_exec_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 16, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_diag_watch_rw_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 17, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_ept_pte(std::uint64_t guest_physical_address, std::uint64_t ept_index)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 18, guest_physical_address, ept_index, 0);
+}
+
+std::uint64_t hypercall::shadow_guest_page(std::uint64_t target_va)
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 5, target_va, 0, 0);
+}
+
+std::uint64_t hypercall::unshadow_guest_page(std::uint64_t target_va)
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 6, target_va, 0, 0);
+}
+
 std::uint64_t hypercall::add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address)
 {
 	hypercall_type_t call_type = hypercall_type_t::add_slat_code_hook;

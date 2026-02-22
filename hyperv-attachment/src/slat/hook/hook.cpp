@@ -129,13 +129,16 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 	hook_entry->set_original_read_access(target_pte->read_access);
 	hook_entry->set_original_write_access(target_pte->write_access);
 	hook_entry->set_original_execute_access(target_pte->execute_access);
+	hook_entry->set_original_user_mode_execute(target_pte->user_mode_execute);
 
 	target_pte->page_frame_number = shadow_page_host_physical_address >> 12;
 	target_pte->execute_access = 1;
+	target_pte->user_mode_execute = 1;
 	target_pte->read_access = 0;
 	target_pte->write_access = 0;
 
 	hook_target_pte->execute_access = 0;
+	hook_target_pte->user_mode_execute = 0;
 	hook_target_pte->read_access = 1;
 	hook_target_pte->write_access = 1;
 #else
@@ -197,10 +200,12 @@ std::uint8_t clean_up_hook_ptes(const virtual_address_t target_guest_physical_ad
 	target_pte->read_access = hook_entry->original_read_access();
 	target_pte->write_access = hook_entry->original_write_access();
 	target_pte->execute_access = hook_entry->original_execute_access();
+	target_pte->user_mode_execute = hook_entry->original_user_mode_execute();
 
 	hook_target_pte->read_access = hook_entry->original_read_access();
 	hook_target_pte->write_access = hook_entry->original_write_access();
 	hook_target_pte->execute_access = hook_entry->original_execute_access();
+	hook_target_pte->user_mode_execute = hook_entry->original_user_mode_execute();
 #else
 	target_pte->execute_disable = !hook_entry->original_execute_access();
 

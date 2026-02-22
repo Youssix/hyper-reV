@@ -11,6 +11,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "usermode", "usermode\usermo
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "loader", "loader\loader.vcxproj", "{B5F91E4A-3C7D-4E2F-9A1B-8D6F5C4E3A2B}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "inspector", "inspector\inspector.vcxproj", "{7A2E3F1B-8C4D-5E6F-A0B1-C2D3E4F5A6B7}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Release|x64 = Release|x64
@@ -24,6 +26,8 @@ Global
 		{2EA786E4-1147-4804-AEAD-17975E24EC46}.Release|x64.Build.0 = Release|x64
 		{B5F91E4A-3C7D-4E2F-9A1B-8D6F5C4E3A2B}.Release|x64.ActiveCfg = Release|x64
 		{B5F91E4A-3C7D-4E2F-9A1B-8D6F5C4E3A2B}.Release|x64.Build.0 = Release|x64
+		{7A2E3F1B-8C4D-5E6F-A0B1-C2D3E4F5A6B7}.Release|x64.ActiveCfg = Release|x64
+		{7A2E3F1B-8C4D-5E6F-A0B1-C2D3E4F5A6B7}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

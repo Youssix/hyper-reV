@@ -31,6 +31,17 @@ namespace hypercall
 	std::uint64_t read_slat_violation_count();
 	std::uint64_t arm_syscall_hijack(std::uint64_t shellcode_va, std::uint64_t rip_offset);
 	std::uint64_t disarm_syscall_hijack();
+	std::uint64_t read_hijack_cpuid_count();
+	std::uint64_t read_hijack_claimed_count();
+	std::uint64_t read_hijack_armed_state();
+
+	std::uint64_t set_diag_watch_pfn(std::uint64_t pfn);
+	std::uint64_t read_diag_watch_exec_count();
+	std::uint64_t read_diag_watch_rw_count();
+	std::uint64_t read_ept_pte(std::uint64_t guest_physical_address, std::uint64_t ept_index); // 0=hyperv_cr3, 1=hook_cr3
+
+	std::uint64_t shadow_guest_page(std::uint64_t target_va);
+	std::uint64_t unshadow_guest_page(std::uint64_t target_va);
 
 	std::uint64_t add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address);
 	std::uint64_t remove_slat_code_hook(std::uint64_t target_guest_physical_address);

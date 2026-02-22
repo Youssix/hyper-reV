@@ -1,0 +1,1993 @@
+Introduction
+
+The integrity of online video games is locked in a perpetual cat-and-mouse battle between anti-cheat developers and cheat engineers. Over the years, we’ve witnessed the rise of increasingly sophisticated evasion tactics, often outpacing those in the antivirus and red-team communities. In this article, we’ll dissect the inner workings of a prominent cheat provider, ring-1.io.
+
+As part of this research, we partially deobfuscated multiple Themida-protected binaries used by ring-1.io, including its UEFI bootloader implant. Several critical functions were recovered to enable static analysis of the implant’s behavior. This work provides visibility into mechanisms that are intentionally designed to resist inspection, including virtualization-assisted hooks, execution redirection, and kernel manipulation techniques.
+
+Ring-1.io has drawn significant attention in recent years, as major game studios like Bungie and Ubisoft pursue legal action to dismantle it, yet it endures despite settlements and ongoing cases that recently uncovered a $12 million Bitcoin stash and new defendants in 2025. This raises a critical question: When lawsuits fail, what’s the next step? That’s where our reverse engineering services come in, tailored for precisely these challenges. Join us for a deep dive into the technical intricacies of ring-1.io.
+
+    https://www.courtlistener.com/docket/67656565/bungie-inc-v-fisher/
+    https://www.courtlistener.com/docket/60084066/bungie-inc-v-thorpe/
+
+Table of Contents
+
+    Loader
+    Bootloader Implant
+    Injection Into Hyper-V
+        Mapping Into Hyper-V
+        SLAT Logic
+    Guest Physical Memory Redirection
+        EPT Violation Handling
+        MTF Handling
+    VMEXIT Hooks
+    Implant Communication
+        Guest User‑Mode → Guest Kernel Implant Communication
+        Kernel Implant → VMX Root Communication
+    Process Injection - Overview
+        Cloning Target Game Page Tables
+        Insertion of Malicious Page Table Entries
+        Loading of Malicious Page Table
+        Call to Hypervisor For Loading Page Tables
+        Hiding Malicious Page Tables
+        Hiding Memory Contents Through EPT
+    EPT Hooks
+        Inline Hook (Relocation) EPT Hook
+        Shellcode-Based (Full-Context) EPT Inline Hook
+    All Hooks
+        Hooks on nvlddmkm.sys (Nvidia Driver)
+        Hook_KiDispatchException
+        hook_KiSystemCall64_ServiceExit
+        hook_NtGdiBitBlt & hook_NtGdiStretchBlt
+        hook_PsWatchWorkingSet
+    Possible Detections
+    Conclusion
+
+Loader
+
+The loader serves as the initial user-mode executable in ring-1.io’s cheat deployment pipeline. Designed for evasion, each loader instance has a unique file hash and self-deletes after execution. This forces customers to redownload a fresh loader with a different filename and hash upon each use, mitigating risks from persistent Windows artifacts such as prefetch files, shim cache entries, and other forensic traces that could be used to flag entire batches of players who have executed the loader.
+
+Communication with ring-1.io’s backend occurs over HTTPS, authenticated via JWT (JSON Web Tokens) for session validation. The loader leverages libcurl as its HTTP client library. To enhance security, HTTP response bodies are encrypted using a custom symmetric scheme: the first 16 bytes of the payload act as the decryption key for the subsequent encrypted data. This approach, while simple, adds a layer of obfuscation against casual interception.
+LLVM IR Level Obfuscation
+
+Once a user authenticates and selects the desired cheats, the loader mounts the EFI system partition and replaces bootmgfw.efi and bootx64.efi on disk with modified versions. For each selected cheat, an additional section is appended to the bootloader implant. These section(s) contain the user’s JWT token, the target process name, and the encrypted game cheat binary. On the next system boot, the modified bootmgfw.efi or bootx64.efi executes before the operating system loads, giving the implant full control over the boot process. The bootloader’s entry point is detoured to an appended section called .trp. After the implant entry point executes, control is returned to the original entry point of bootmgfw.efi or bootx64.efi. These modifications inherently violate Secure Boot integrity. As such ring-1 does not support secure boot.
+LLVM IR Level Obfuscation
+Bootloader Implant
+
+The bootkit is protected with Themida and implements several security mechanisms that execute prior to the original entry point. The virtual machine components are compressed and multiple sections are encrypted. During Themida boot execution, the entry point decompresses the VM components and decrypts the protected sections. Once the Themida boot code completes, control is transferred to the implant’s real entry point.
+
+Upon execution of the real entry point, the implant immediately restores the original bootmgfw.efi and bootx64.efi binaries on the EFI system partition. It then manipulates the last modification time of these files and parent folders in an attempt to evade detection.
+EFI_STATUS
+UpdateTimestampsRecursive(
+    IN EFI_FILE_PROTOCOL *Root,
+    IN CHAR16 *Path,
+    IN EFI_FILE_INFO *OriginalFileInfo,
+    IN EFI_BOOT_SERVICES *BootServices
+)
+{
+    EFI_STATUS Status;
+    EFI_FILE_PROTOCOL *File;
+    EFI_FILE_INFO *FileInfo = NULL;
+    EFI_GUID FileInfoGuid = EFI_FILE_INFO_ID;
+    UINTN FileInfoSize = 0;
+    CHAR16 CurrentPath[256];
+    CHAR16 *LastSeparator;
+    
+    // Copy the path to work with
+    StrCpyS(CurrentPath, 256, Path);
+    
+    // Walk up the directory tree
+    while (TRUE) {
+        // Open current path
+        Status = Root->Open(
+            Root,
+            &File,
+            CurrentPath,
+            EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE,
+            0
+        );
+        if (EFI_ERROR(Status)) {
+            // If we can't open it, move to parent
+            goto next_parent;
+        }
+        
+        // Get file info size
+        FileInfoSize = 0;
+        File->GetInfo(File, &FileInfoGuid, &FileInfoSize, NULL);
+        
+        // Allocate buffer
+        Status = BootServices->AllocatePool(
+            EfiBootServicesData,
+            FileInfoSize,
+            (VOID **)&FileInfo
+        );
+        if (!EFI_ERROR(Status)) {
+            Status = File->GetInfo(
+                File,
+                &FileInfoGuid,
+                &FileInfoSize,
+                FileInfo
+            );
+            if (!EFI_ERROR(Status)) {
+                // Spoof timestamp with original timestamp
+                FileInfo->CreateTime = OriginalFileInfo->CreateTime;
+                FileInfo->LastAccessTime = OriginalFileInfo->LastAccessTime;
+                FileInfo->ModificationTime = OriginalFileInfo->ModificationTime;
+                
+                File->SetInfo(
+                    File,
+                    &FileInfoGuid,
+                    FileInfoSize,
+                    FileInfo
+                );
+            }
+            File->Flush(File);
+            BootServices->FreePool(FileInfo);
+            FileInfo = NULL;
+        }
+        File->Close(File);
+        
+next_parent:
+        // Find last backslash to get parent directory
+        LastSeparator = NULL;
+        for (UINTN i = 0; CurrentPath[i] != L'\0'; i++) {
+            if (CurrentPath[i] == L'\\') {
+                LastSeparator = &CurrentPath[i];
+            }
+        }
+        
+        // If no separator found, we're done
+        if (LastSeparator == NULL) {
+            break;
+        }
+        
+        // Terminate at last separator to get parent path
+        *LastSeparator = L'\0';
+        
+        // If path is now empty, we're at root
+        if (CurrentPath[0] == L'\0') {
+            break;
+        }
+    }
+    
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS
+EFIAPI
+RestoreBootManager(
+    IN EFI_SYSTEM_TABLE *SystemTable
+)
+{
+    EFI_STATUS Status;
+    EFI_BOOT_SERVICES *BootServices = SystemTable->BootServices;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *FileSystem;
+    EFI_FILE_PROTOCOL *Root;
+    EFI_FILE_PROTOCOL *BackupFile;
+    EFI_FILE_PROTOCOL *TargetFile;
+    EFI_FILE_PROTOCOL *OriginalFile;
+    EFI_GUID FileSystemGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    EFI_GUID FileInfoGuid = EFI_FILE_INFO_ID;
+    
+    UINTN HandleCount = 0;
+    EFI_HANDLE *HandleBuffer = NULL;
+    VOID *BackupBuffer = NULL;
+    UINTN BackupSize = 0;
+    UINTN WriteSize = 0;
+    EFI_FILE_INFO *FileInfo = NULL;
+    EFI_FILE_INFO *OriginalFileInfo = NULL;
+    UINTN FileInfoSize = 0;
+    
+    // File paths to restore (obfuscated with XOR strings)
+    CHAR16 *BackupPath = XORSTR(L"EFI\\Microsoft\\Boot\\bootmgfw.efi.bak");
+    CHAR16 *BootMgrPath = XORSTR(L"EFI\\Microsoft\\Boot\\bootmgr.efi");
+    CHAR16 *TargetPath1 = XORSTR(L"EFI\\Microsoft\\Boot\\bootmgfw.efi");
+    CHAR16 *TargetPath2 = XORSTR(L"EFI\\Boot\\bootx64.efi");
+    
+    // Locate all handles supporting SimpleFileSystem protocol
+    Status = BootServices->LocateHandleBuffer(
+        ByProtocol,
+        &FileSystemGuid,
+        NULL,
+        &HandleCount,
+        &HandleBuffer
+    );
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+    
+    // Open the first filesystem (should be ESP)
+    Status = BootServices->OpenProtocol(
+        HandleBuffer[0],
+        &FileSystemGuid,
+        (VOID **)&FileSystem,
+        gImageHandle,
+        NULL,
+        EFI_OPEN_PROTOCOL_GET_PROTOCOL
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_handles;
+    }
+    
+    // Open the root volume
+    Status = FileSystem->OpenVolume(FileSystem, &Root);
+    if (EFI_ERROR(Status)) {
+        goto cleanup_handles;
+    }
+    
+    // Open backup file (bootmgfw.efi.bak)
+    Status = Root->Open(
+        Root,
+        &BackupFile,
+        BackupPath,
+        EFI_FILE_MODE_READ,
+        0
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_root;
+    }
+    
+    // Open bootmgr.efi to get the original Microsoft timestamp
+    Status = Root->Open(
+        Root,
+        &OriginalFile,
+        BootMgrPath,
+        EFI_FILE_MODE_READ,
+        0
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_backup;
+    }
+    
+    // Get original file info to steal the timestamp
+    FileInfoSize = 0;
+    Status = OriginalFile->GetInfo(
+        OriginalFile,
+        &FileInfoGuid,
+        &FileInfoSize,
+        NULL
+    );
+    if (Status != EFI_BUFFER_TOO_SMALL) {
+        goto cleanup_original;
+    }
+    
+    Status = BootServices->AllocatePool(
+        EfiBootServicesData,
+        FileInfoSize,
+        (VOID **)&OriginalFileInfo
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_original;
+    }
+    
+    Status = OriginalFile->GetInfo(
+        OriginalFile,
+        &FileInfoGuid,
+        &FileInfoSize,
+        OriginalFileInfo
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_original_fileinfo;
+    }
+    
+    OriginalFile->Close(OriginalFile);
+    OriginalFile = NULL;
+    
+    // Get backup file info to determine size
+    FileInfoSize = 0;
+    Status = BackupFile->GetInfo(
+        BackupFile,
+        &FileInfoGuid,
+        &FileInfoSize,
+        NULL
+    );
+    if (Status != EFI_BUFFER_TOO_SMALL) {
+        goto cleanup_original_fileinfo;
+    }
+    
+    Status = BootServices->AllocatePool(
+        EfiBootServicesData,
+        FileInfoSize,
+        (VOID **)&FileInfo
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_original_fileinfo;
+    }
+    
+    Status = BackupFile->GetInfo(
+        BackupFile,
+        &FileInfoGuid,
+        &FileInfoSize,
+        FileInfo
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_fileinfo;
+    }
+    
+    BackupSize = (UINTN)FileInfo->FileSize;
+    BootServices->FreePool(FileInfo);
+    FileInfo = NULL;
+    
+    // Allocate buffer for file contents
+    Status = BootServices->AllocatePool(
+        EfiBootServicesData,
+        BackupSize,
+        &BackupBuffer
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_original_fileinfo;
+    }
+    
+    // Read backup file
+    Status = BackupFile->Read(BackupFile, &BackupSize, BackupBuffer);
+    if (EFI_ERROR(Status)) {
+        goto cleanup_buffer;
+    }
+    
+    // Write to bootmgfw.efi
+    Status = Root->Open(
+        Root,
+        &TargetFile,
+        TargetPath1,
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
+        0
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_buffer;
+    }
+    
+    WriteSize = BackupSize;
+    Status = TargetFile->Write(TargetFile, &WriteSize, BackupBuffer);
+    if (EFI_ERROR(Status)) {
+        TargetFile->Close(TargetFile);
+        goto cleanup_buffer;
+    }
+    
+    // Get current file info, then overwrite with original timestamp
+    FileInfoSize = 0;
+    TargetFile->GetInfo(TargetFile, &FileInfoGuid, &FileInfoSize, NULL);
+    
+    Status = BootServices->AllocatePool(
+        EfiBootServicesData,
+        FileInfoSize,
+        (VOID **)&FileInfo
+    );
+    if (!EFI_ERROR(Status)) {
+        Status = TargetFile->GetInfo(
+            TargetFile,
+            &FileInfoGuid,
+            &FileInfoSize,
+            FileInfo
+        );
+        if (!EFI_ERROR(Status)) {
+            // Spoof timestamp with original Microsoft file timestamp
+            FileInfo->CreateTime = OriginalFileInfo->CreateTime;
+            FileInfo->LastAccessTime = OriginalFileInfo->LastAccessTime;
+            FileInfo->ModificationTime = OriginalFileInfo->ModificationTime;
+            
+            TargetFile->SetInfo(
+                TargetFile,
+                &FileInfoGuid,
+                FileInfoSize,
+                FileInfo
+            );
+        }
+        TargetFile->Flush(TargetFile);
+        BootServices->FreePool(FileInfo);
+        FileInfo = NULL;
+    }
+    TargetFile->Close(TargetFile);
+    
+    // Write to bootx64.efi
+    Status = Root->Open(
+        Root,
+        &TargetFile,
+        TargetPath2,
+        EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE,
+        0
+    );
+    if (EFI_ERROR(Status)) {
+        goto cleanup_buffer;
+    }
+    
+    WriteSize = BackupSize;
+    Status = TargetFile->Write(TargetFile, &WriteSize, BackupBuffer);
+    if (EFI_ERROR(Status)) {
+        TargetFile->Close(TargetFile);
+        goto cleanup_buffer;
+    }
+    
+    // Get current file info, then overwrite with original timestamp
+    FileInfoSize = 0;
+    TargetFile->GetInfo(TargetFile, &FileInfoGuid, &FileInfoSize, NULL);
+    
+    Status = BootServices->AllocatePool(
+        EfiBootServicesData,
+        FileInfoSize,
+        (VOID **)&FileInfo
+    );
+    if (!EFI_ERROR(Status)) {
+        Status = TargetFile->GetInfo(
+            TargetFile,
+            &FileInfoGuid,
+            &FileInfoSize,
+            FileInfo
+        );
+        if (!EFI_ERROR(Status)) {
+            // Spoof timestamp with original Microsoft file timestamp
+            FileInfo->CreateTime = OriginalFileInfo->CreateTime;
+            FileInfo->LastAccessTime = OriginalFileInfo->LastAccessTime;
+            FileInfo->ModificationTime = OriginalFileInfo->ModificationTime;
+            
+            TargetFile->SetInfo(
+                TargetFile,
+                &FileInfoGuid,
+                FileInfoSize,
+                FileInfo
+            );
+        }
+        TargetFile->Flush(TargetFile);
+        BootServices->FreePool(FileInfo);
+        FileInfo = NULL;
+    }
+    TargetFile->Close(TargetFile);
+    
+    // Delete backup file
+    BackupFile->Delete(BackupFile);
+    BackupFile = NULL;
+    
+    // Update timestamps on modified files and all parent directories
+    UpdateTimestampsRecursive(Root, TargetPath1, OriginalFileInfo, BootServices);
+    UpdateTimestampsRecursive(Root, TargetPath2, OriginalFileInfo, BootServices);
+    
+    Status = EFI_SUCCESS;
+
+cleanup_fileinfo:
+    if (FileInfo) {
+        BootServices->FreePool(FileInfo);
+    }
+
+cleanup_buffer:
+    if (BackupBuffer) {
+        BootServices->FreePool(BackupBuffer);
+    }
+
+cleanup_original_fileinfo:
+    if (OriginalFileInfo) {
+        BootServices->FreePool(OriginalFileInfo);
+    }
+    
+cleanup_original:
+    if (OriginalFile) {
+        OriginalFile->Close(OriginalFile);
+    }
+    
+cleanup_backup:
+    if (BackupFile) {
+        BackupFile->Close(BackupFile);
+    }
+    
+cleanup_root:
+    Root->Close(Root);
+    
+cleanup_handles:
+    if (HandleBuffer) {
+        BootServices->FreePool(HandleBuffer);
+    }
+    
+    return Status;
+}
+view raw
+entrypoint.c hosted with ❤ by GitHub
+
+After restoring bootmgfw.efi and bootx64.efi, the implant performs a series of anti-virtualization timing checks. These checks combine CPUID (forced vm-exiting instruction) with high-resolution timestamp measurements using RDTSC/RDTSCP, allowing the implant to measure instruction-level timing anomalies that commonly occur under virtualization or heavy introspection.
+
+By comparing expected cycle deltas across repeated CPUID + RDTSC(P) sequences, the implant attempts to identify the presence of a hypervisor or analysis environment. If these checks indicate execution under virtualization, the implant deliberately induces a system crash, terminating execution before any further boot-stage hooks or Hyper-V modifications are installed.
+
+If no virtualization is detected, the implant continues to install a hook on SetVirtualAddressMap by directly replacing the corresponding function pointer in the EFI_RUNTIME_SERVICES table. This is performed as a simple pointer swap, requiring no inline patching or code modification within the firmware itself.
+_BYTE *Phase0_AllocateAndInitialize_TwoMemoryPools()
+{
+  void *v0; // rcx
+  void *EightyMegaByteAllocation; // rcx
+  EFI_RUNTIME_SERVICES *RuntimeServices; // rax
+  _BYTE *result; // rax
+
+  (*EfiSystemTable_0)->BootServices->AllocatePages)(
+    AllocateAnyPages,
+    EfiRuntimeServicesCode,
+    (TwentyMegaBytes >> 12) - (((TwentyMegaBytes & 0xFFF) == 0) - 1LL),
+    &LargeTwoMegaByteAllocation);
+  v0 = LargeTwoMegaByteAllocation;
+  *(_QWORD *)LargeTwoMegaByteAllocation_0 = LargeTwoMegaByteAllocation;
+  memset(v0, 0, TwentyMegaBytes);
+  
+  (*EfiSystemTable_0)->BootServices->AllocatePages)(
+    AllocateAnyPages,
+    EfiRuntimeServicesCode,
+    (EightyMegaBytes >> 12) - (((EightyMegaBytes & 0xFFF) == 0) - 1LL),
+    &::EightyMegaByteAllocation);
+  EightyMegaByteAllocation = ::EightyMegaByteAllocation;
+  *(_QWORD *)EightyMegaByteAllocation_0 = ::EightyMegaByteAllocation;
+  memset(EightyMegaByteAllocation, 0, EightyMegaBytes);
+  
+  // Install SetVirtualAddressMap hook
+  RuntimeServices = (*EfiSystemTable_0)->RuntimeServices;
+  SetVirtualAddressMap = (__int64)RuntimeServices->SetVirtualAddressMap;
+  RuntimeServices->SetVirtualAddressMap = (VOID *)hook_SetVirtualAddressMap;
+  
+  result = g_bAdvancedHooksEnabled;
+  if ( g_bAdvancedHooksEnabled[0] )
+    JUMPOUT(0x14002E0E0LL);
+  return result;
+}
+view raw
+Phase0_AllocateAndInitialize_TwoMemoryPools.c hosted with ❤ by GitHub
+
+Although UEFI firmware already executes in long mode and thus maintains its own page tables, SetVirtualAddressMap is invoked during the handoff from firmware to the operating system. Specifically, the function is called by winload after ExitBootServices, when the OS loader finalizes the kernel’s virtual address space and provides EFI with the virtual address mappings required for runtime services. When the hooked SetVirtualAddressMap is invoked, the implant captures the return address and walks backward through memory to recover the image base of the calling module, which is that of winload.
+int __fastcall hook_SetVirtualAddressMap(
+        unsigned __int64 MemoryMapSize,
+        unsigned __int64 DescriptorSize,
+        unsigned int DescriptorVersion,
+        EFI_MEMORY_DESCRIPTOR *VirtualMap)
+{
+  *(_BYTE *)SetVirtualAddressMapCalled = 1;
+  PrepareImageStructure((__int64)ImageStructure, (int *)_ImageBase, 0);
+  if ( (DescriptorSize | MemoryMapSize) >> 32 )
+  {
+    DescriptorCount = MemoryMapSize / DescriptorSize;
+    if ( DescriptorSize > MemoryMapSize )
+    {
+LABEL_3:
+      NewImageVirtualBase = 0LL;
+      goto LABEL_12;
+    }
+  }
+  else
+  {
+    DescriptorCount = (unsigned int)MemoryMapSize / (unsigned int)DescriptorSize;
+    if ( DescriptorSize > MemoryMapSize )
+      goto LABEL_3;
+  }
+  VirtualMapPtr = VirtualMap;
+  pCurrentDesc = &VirtualMap->PhysicalStart;
+  NewImageVirtualBase = 0LL;
+  DescIdx = 0LL;
+  while ( 1 )
+  {
+    if ( pCurrentDesc[3] < 0 )
+    {
+      CurrentImageBase = ImageStructure[0];
+      if ( (unsigned __int64)*pCurrentDesc <= ImageStructure[0]
+        && CurrentImageBase + GetStructOffset24((__int64)ImageStructure) <= (unsigned __int64)(*pCurrentDesc
+                                                                                             + (pCurrentDesc[2] << 12)) )
+      {
+        break;
+      }
+    }
+    ++DescIdx;
+    pCurrentDesc = (__int64 *)((char *)pCurrentDesc + DescriptorSize);
+    if ( DescIdx >= DescriptorCount )
+      goto LABEL_11;
+  }
+  NewImageVirtualBase = pCurrentDesc[1] + ImageStructure[0] - *pCurrentDesc;
+  Update_Image_Relocations(ImageStructure, NewImageVirtualBase, ImageStructure[0], 1);
+LABEL_11:
+  if ( DescriptorSize <= MemoryMapSize )
+  {
+    EfiTablePhysAddr = *EfiSystemTable_0;
+    pDescAttr_EfiTable = &VirtualMapPtr->Attribute;
+    EfiTableLoopIdx = 0LL;
+    do
+    {
+      if ( *pDescAttr_EfiTable < 0 )
+      {
+        PhysStart_EfiTable = *(pDescAttr_EfiTable - 3);
+        if ( (unsigned __int64)EfiTablePhysAddr >= PhysStart_EfiTable
+          && (unsigned __int64)EfiTablePhysAddr < PhysStart_EfiTable + (*(pDescAttr_EfiTable - 1) << 12) )
+        {
+          *EfiSystemTable_0 = (EFI_SYSTEM_TABLE *)((char *)EfiTablePhysAddr
+                                                 + *(pDescAttr_EfiTable - 2)
+                                                 - PhysStart_EfiTable);
+        }
+      }
+      ++EfiTableLoopIdx;
+      pDescAttr_EfiTable = (__int64 *)((char *)pDescAttr_EfiTable + DescriptorSize);
+    }
+    while ( EfiTableLoopIdx < DescriptorCount );
+    LargeMB_PhysAddr = (char *)LargeTwoMegaByteAllocation;
+    p_Attribute = &VirtualMapPtr->Attribute;
+    LargeMB_LoopIdx = 0LL;
+    do
+    {
+      if ( *p_Attribute < 0 )
+      {
+        PhysStart_LargeMB = *(p_Attribute - 3);
+        if ( (unsigned __int64)LargeMB_PhysAddr >= PhysStart_LargeMB
+          && (unsigned __int64)LargeMB_PhysAddr < PhysStart_LargeMB + (*(p_Attribute - 1) << 12) )
+        {
+          LargeTwoMegaByteAllocation = &LargeMB_PhysAddr[*(p_Attribute - 2) - PhysStart_LargeMB];
+        }
+      }
+      ++LargeMB_LoopIdx;
+      p_Attribute = (__int64 *)((char *)p_Attribute + DescriptorSize);
+    }
+    while ( LargeMB_LoopIdx < DescriptorCount );
+    EightyMB_PhysAddr = (char *)EightyMegaByteAllocation;
+    pDescAttr_EightyMB = &VirtualMapPtr->Attribute;
+    EightyMB_LoopIdx = 0LL;
+    do
+    {
+      if ( *pDescAttr_EightyMB < 0 )
+      {
+        PhysStart_EightyMB = *(pDescAttr_EightyMB - 3);
+        if ( (unsigned __int64)EightyMB_PhysAddr >= PhysStart_EightyMB
+          && (unsigned __int64)EightyMB_PhysAddr < PhysStart_EightyMB + (*(pDescAttr_EightyMB - 1) << 12) )
+        {
+          EightyMegaByteAllocation = &EightyMB_PhysAddr[*(pDescAttr_EightyMB - 2) - PhysStart_EightyMB];
+        }
+      }
+      ++EightyMB_LoopIdx;
+      pDescAttr_EightyMB = (__int64 *)((char *)pDescAttr_EightyMB + DescriptorSize);
+    }
+    while ( EightyMB_LoopIdx < DescriptorCount );
+  }
+LABEL_12:
+  wbinvd(NewImageVirtualBase - _ImageBase);
+  pPageScanPtr = (int *)(retaddr & 0xFFFFFFFFFFFFF000uLL);
+  do
+  {
+    WinloadBase = pPageScanPtr;
+    PESignature = *(unsigned __int16 *)pPageScanPtr;
+    pPageScanPtr -= 1024;
+  }
+  while ( PESignature != 0x5A4D );
+  Phase1_BootkitMain_InstallAllHooks(WinloadBase);
+  return Additional_Phase1_Processing();
+}
+view raw
+hook_SetVirtualAddressMap.c hosted with ❤ by GitHub
+
+Once the base of winload is determined, the implant performs a series of signature scans for the following instruction sequences:
+Block.m128_u64[0] = 0x917E2BEC1DDC092BuLL;
+Block.m128_u64[1] = 0x1D052D79D8F60320LL;     // 48 8B 0D ? ? ? ? 48 85 C9 75 (hvloader base address)
+v56.m128_u64[0] = 0x1E3310CA89ABD26DLL;
+v56.m128_u64[1] = 0xC969DFA7A910AE6AuLL;
+v58[0].m128_u64[0] = 0xD54E0BAE25FC311FuLL;
+v58[0].m128_u64[1] = 0x22251259E7D63C00LL;
+v58[1].m128_u64[0] = 0x5D1325F2A993E64DLL;
+v58[1].m128_u64[1] = 0xC969DFA79C278E53uLL;
+v58[0] = _mm_xor_ps(Block, v58[0]);
+v58[1] = _mm_xor_ps(v56, v58[1]);
+pWinloadSearchCtx = (__int64 *)(WinloadImageStruct + 32);
+ClearOffset16(WinloadImageStruct + 0x20);
+HvLoaderScanResult = ParseBytes_BuildStructure(pWinloadSearchCtx, (unsigned __int8 *)v58);
+pHvLoaderBase = *(int **)(HvLoaderScanResult + *(int *)(HvLoaderScanResult + 3) + 7);
+if ( pHvLoaderBase )
+{
+  PrepareImageStructure((__int64)v58, pHvLoaderBase, 0);
+  v56.m128_u64[0] = 0x917E2BEC1DDC092BuLL;
+  v56.m128_u64[1] = 0x1D052D79D8F60320LL;
+  v54.m128_u64[0] = 0x1E3310CA89ABD26DLL;
+  v54.m128_u64[1] = 0xC969DFA7A910AE6AuLL;    // E8 ? ? ? ? E8 ? ? ? ? 80 3D (hvloader switch context)
+  Block.m128_u64[0] = 0xAE5E14CC22FC316EuLL;
+  Block.m128_u64[1] = 0x3D3A0D419DD63C00LL;
+  v53.m128_u64[0] = 0x2E0B30F5A994F252LL;
+  v53.m128_u64[1] = 0xC969DFA7A9549D4AuLL;
+  Block = _mm_xor_ps(v56, Block);
+  v53 = _mm_xor_ps(v54, v53);
+  ClearOffset16((__int64)&v58[2]);
+  SwitchContextScanResult = ParseBytes_BuildStructure((__int64 *)&v58[2], (unsigned __int8 *)&Block);
+  if ( !SwitchContextScanResult || SwitchContextScanResult + *(int *)(SwitchContextScanResult + 1) == -5 )
+  {
+    Cleanup_FreeInstructionContext((__int64)v58);
+  }
+  else
+  {
+    InstallHook(
+      &g_p1C_0x140e46c3e,
+      SwitchContextScanResult + *(int *)(SwitchContextScanResult + 1) + 5,
+      (unsigned __int64)hook_hv_launch);
+    Cleanup_FreeInstructionContext((__int64)v58);
+  }
+}
+view raw
+Deobfuscated_Winload_Installhooks.c hosted with ❤ by GitHub
+
+48 8B 0D ? ? ? ? 48 85 C9 75
+
+This pattern matches an instruction that dereferences a pointer in the .data section, which holds the base address of hvloader. The hvloader image is then scanned for the following signature:
+
+E8 ? ? ? ? E8 ? ? ? ? 80 3D
+
+This pattern matches a small transition thunk responsible for transferring execution into Hyper-V. A hook is placed on this thunk, allowing the implant to intercept execution at the point where control transfers to Hyper-V. We have labeled it hvloader.dll!hv_launch.
+LLVM IR Level Obfuscation
+Injection Into Hyper-V
+
+hvloader.dll!hv_launch is responsible for launching Hyper-V by jumping to its entry point. The attacker places a hook on this routine to be able to intercept the launching of Hyper-V.
+void __fastcall hvloader_hv_launch(
+	std::uint64_t hyperv_cr3,
+	std::uint8_t* hyperv_entry_point,
+	std::uint8_t* entry_point_gadget,
+	std::uint64_t guest_kernel_cr3
+)
+{
+    __writecr3(guest_kernel_cr3);
+	__asm { jmp entry_point_gadget }
+}
+view raw
+hvloader_hv_launch.c hosted with ❤ by GitHub
+
+In this detour, the attacker maps the implant into Hyper-V and the guest kernel. The attacker also hooks Hyper-V’s VMEXIT entry and handler to be able to intercept any VMEXITs that occur in the system.
+
+This hook intercepts the final Hyper-V image used before launch. The final Hyper-V image is protected by SLAT, which means that the guest can not read the contents by default. There are other copies of the image that are used when loading Hyper-V (e.g. the compressed portable executable buffer). These copies are not protected by SLAT, which means the guest can read the contents.
+
+Previous Hyper-V hijacking projects (e.g. backengineering/Voyager) patched these initial copies to be able to have control over the final Hyper-V image. This meant that these other projects could be detected if the copies were to be found by the guest and compared against the real Hyper-V image.
+
+Ring-1 attempts to evade this detection vector (in the same way as noahware/hyper-reV) by patching only the final Hyper-V image, so that the unprotected copies are unaffected. This means that the guest will not be able to validate the contents of the Hyper-V images as only the final image (which is not accessible by the guest by default) was tampered with.
+
+The issue with Ring-1’s implementation is that they fail to preserve this inaccessibility by creating insecure SLAT mappings which allow the guest to access all of the hosts memory. This effectively makes the patching of only the final Hyper-V image redundant as it too will be visible to the guest due to the poor SLAT implementation.
+
+If the SLAT mappings preserved the protection placed on the final Hyper-V image, then the attacker would not have the detection vector of the Hyper-V image patching being visible to the guest.
+
+The following signatures are scanned for:
+
+    65 8B 14 25 ? ? ? ? 48 8D 0D ? ? ? ? 44 - GS offset that contains the current logical processor’s ID. This allows the attacker to give each logical processor their own context and access it by this ID.
+    C7 44 24 ? ? ? ? ? 48 89 4C 24 ? 48 8B 4C 24 - Hyper-V’s VMEXIT entry point. This is hooked by the attacker. See “VMEXIT hooks” for more.
+    E8 ? ? ? ? E9 ? ? ? ? 74 0D - Hyper-V’s VMEXIT logic handler. This is also hooked by the attacker. See “VMEXIT hooks” for more.
+
+Mapping Into Hyper-V
+
+In the detour for hvloader.dll!hv_launch, the implant is mapped both into the guest kernel page tables, as well as the host Hyper-V page tables. This allows the implant to be executed from both the guest context and in the host Hyper-V context.
+
+The snippet for this mapping logic is below:
+r1implant_base_address = GetModuleInfoBase(*(_QWORD *)r1implant_info[0]);
+r1implant_size = GetStructOffset24(*(_QWORD *)r1implant_info[0]);
+
+if ( r1implant_size )
+{
+    current_offset = 0;
+    size_to_map = r1implant_size;
+    do
+    {
+      current_cr3 = __readcr3();
+      guest_pte = *(_QWORD *)AllocatePageTableEntry_RecursiveSetup(
+                               current_cr3,
+                               current_offset + r1implant_base_address,
+                               0,
+                               0,
+                               0)
+                & 0xFFFFFFFFF000LL;
+
+      hyperv_pte = AllocatePageTableEntry_RecursiveSetup(
+        hyperv_cr3, 
+        current_offset + r1implant_base_address,
+        0,
+        0,
+        0);
+
+      *(_QWORD *)hyperv_pte = (*(_QWORD *)hyperv_pte & 0x7FFF000000000FFCLL) + guest_pte + 3;
+      current_offset += 0x1000LL;
+    }
+    while ( current_offset < size_to_map );
+}
+view raw
+implant_mapping_hyperv.c hosted with ❤ by GitHub
+SLAT Logic
+
+In the implant, each logical processor in the root partition creates their own unique EPTP (EPT pointer) which describes an identity map of all guest physical memory.
+
+This identity map is created in the first VMEXIT for each logical processor.
+
+These EPT (extended page tables) mappings are not shared with other logical processors, so each processor can safely edit the EPT state in their current processor safely with no synchronisation issues.
+
+The identity map EPTP for each logical processor will now be referred to as the malicious EPTP.
+
+Although Hyper-V creates its own EPTP to be used globally on all logical processors, the attacker forces the guest to always execute under the malicious EPTPs.
+
+This has detection vectors as these malicious EPTPs will not reflect the state of the Hyper-V EPTP. This is especially evident on a system enforced by HVCI (hypervisor enforced code integrity). Furthermore, any protection placed on the Hyper-V image will be erased, meaning the guest can access the image. This means that the image can be integrity checked through the guest by an anticheat.
+Guest Physical Memory Redirection
+
+When an EPT-based memory redirection is placed, the guest will be able to read and write to the original page of memory as normal, but when it is executed a different page of memory will be used by the CPU. This allows an attacker to change the contents of a code page without the guest being able to read it to check the contents.
+EPT Violation Handling
+
+An EPT violation will happen when the guest attempts to access a page in a way that is not currently allowed. For example, if the redirected page of memory currently describes the code page, the permissions will be –X (not readable, not writable, but is executable). This allows the CPU to execute this page, but whenever a read or write happens to it, the attacker can switch the page back to the original and adjust permissions.
+
+Whenever an execution violation happens, the page will be redirected back to the hidden contents that are used for execution. The permissions are also set to –X. The guest will then continue to execute as normal.
+
+Here is the snippet for the execute violation:
+if ((exit_qualification & 4) != 0) // if caught an execute violation
+{
+    // set page frame number to shadow page and only executable
+	*ept_pte = (ept_hook_info->shadow_page_index & 0xFFFFFFFFF000LL) + (*ept_pte & 0xFFFF000000000FF8uLL) + 4;
+    
+    return 1;
+}
+view raw
+ept_execute_violation.c hosted with ❤ by GitHub
+
+Whenever either a read or write violation happens, the original page is restored and the permissions are set to RW- (is readable, is writable, but not executable). This will mean the read or write operation will occur on the original page of memory. If a write violation happens, the MTF (monitor trap flag) is set. This means after the instruction finishes executing, the guest will VMEXIT and the attacker can execute code almost immediately after the instruction finishes. This is used to later copy the contents of the write to the hidden code page.
+
+If an instruction reads from the same page it is executing in (e.g. for jump tables) then that would cause an infinite loop of switching between allowing the page to be read and executed. To avoid this, the EPT page permissions are set to R-X (is readable, is not writable, is executable) if a read occurs to the same page that it is executing in. The MTF flag is then set to revert these permissions later.
+
+Here is the snippet for the read violation:
+if ((exit_qualification & 1) != 0)      // if caught a read
+{
+    guest_rip = get_guest_rip(a1);            // handle read
+    readable_pte_permissions = *ept_pte & 0xFFFF000000000FF8uLL
+                               | ept_hook_info->original_page_index & 0xFFFFFFFFF000LL;
+    if ( (guest_linear_address ^ guest_rip) > 0xFFF )// if a self read
+    {
+        *ept_pte = readable_pte_permissions | 5;  // read and execute access as its a self read
+
+        *((_QWORD *)get_logical_processor_state() + 5) = ept_pte;
+        *((_QWORD *)get_logical_processor_state() + 6) = ept_hook_info->shadow_page_index;
+        *((_QWORD *)get_logical_processor_state() + 8) = ept_hook_info;
+        *((_DWORD *)get_logical_processor_state() + 14) = 4;
+
+        get_logical_processor_state()[61] = 0; // does not require write sync
+        set_monitor_trap_flag();
+    }
+    else
+    {
+        *ept_pte = readable_pte_permissions | 1;// read access only
+    }
+}
+view raw
+ept_read_violation.c hosted with ❤ by GitHub
+
+Here is the snippet for the write violation:
+if ( (exit_qualification & 2) != 0 )        // if caught a write
+{
+    // set pte to original page frame number, and permissions (read, write, execute)
+    *ept_pte = (guest_physical_address & 0xFFFFFFFFF000LL) + (*ept_pte & 0xFFFF000000000FF8uLL) + 7;
+    
+    *((_QWORD *)get_logical_processor_state() + 5) = ept_pte;
+    *((_QWORD *)get_logical_processor_state() + 6) = ept_hook_info->shadow_page_index;
+    *((_DWORD *)get_logical_processor_state() + 14) = 4;
+    
+    get_logical_processor_state()[61] = 1;    // signal the need to synchronise this write
+}
+view raw
+ept_write_violation.c hosted with ❤ by GitHub
+MTF Handling
+
+In the MTF handler, the changes from the read/write EPT violation are reverted. This means the permissions are reverted back to –X and the code page is loaded again. This means that the guest is able to temporarily have access to the original page of memory only for reads and writes, but right after it is reverted back to the code page.
+
+In addition, for write violations the contents of the writes are written to the shadow code page in the MTF handler. This allows the attacker to avoid detections where an anticheat will write instructions to a page and execute them, comparing the intended result with the actual result of the execution. If the writes were not shadowed to the hidden code page, then the attacker would fail this check.
+
+This style of page redirection is similar to VEH hooking, but it instead uses:
+
+    The MTF flag in place of the trap flag in the x86 FLAGS register
+    SLAT to redirect what page of instruction memory will be executed for a given address in place of changing the guest RIP.
+
+Here is the snippet for the MTF handler:
+ept_pte = *((_QWORD *)get_logical_processor_state() + 5);
+if (ept_pte)
+{
+    ept_pte0 = (unsigned __int64 *)*((_QWORD *)get_logical_processor_state() + 5);
+    shadow_page_pfn = *((_QWORD *)get_logical_processor_state() + 6) & 0xFFFFFFFFF000LL;
+    *ept_pte0 = shadow_page_pfn
+              | *((_DWORD *)get_logical_processor_state() + 14) & 7 // permissions on reversal
+              | *ept_pte0 & 0xFFFF000000000FF8uLL;
+    if (get_logical_processor_state()[61]) // if should synchronise writes
+    {
+        ept_hook_info = (_EPT_HOOK *)*((_QWORD *)get_logical_processor_state() + 8);
+        original_page_mapped = map_guest_physical_to_host_virtual(ept_hook_info->original_page_index);
+        shadow_page_mapped = map_guest_physical_to_host_virtual(ept_hook_info->shadow_page_index);
+        for ( i = 0; i != 4096; i += 2LL )
+        {
+            v9 = *(_QWORD *)&ept_hook_info->Unknown[8 * (i >> 6)];
+            if ( !_bittest64(&v9, i & 0x3E) )
+              *(_BYTE *)(shadow_page_mapped + i) = *(_BYTE *)(original_page_mapped + i);
+            v10 = *(_QWORD *)&ept_hook_info->Unknown[8 * (i >> 6)];
+            if ( !_bittest64(&v10, (unsigned __int8)(i + 1)) )
+              *(_BYTE *)(shadow_page_mapped + i + 1) = *(_BYTE *)(original_page_mapped + i + 1);
+        }
+    }
+    *((_QWORD *)get_logical_processor_state() + 5) = 0; // reset this ept reversal state
+    *((_QWORD *)get_logical_processor_state() + 6) = 0;
+    *((_DWORD *)get_logical_processor_state() + 14) = 0;
+    get_logical_processor_state()[61] = 0;
+    *((_QWORD *)get_logical_processor_state() + 8) = 0;
+    reset_mtf_flag(a1);
+    invept_descriptor[0] = *((_QWORD *)get_logical_processor_state() + 4);
+    invept_descriptor[1] = 0;
+    invept(1, invept_descriptor);
+}
+view raw
+monitor_trap_flag.c hosted with ❤ by GitHub
+VMEXIT Hooks
+
+The attacker places 2 hooks on Hyper-V’s VMEXIT routine:
+
+    On the entry point of the VMEXIT, this allows the attacker to be able to execute before Hyper-V has saved any of the guest context so that they can VMRESUME with no need to clean up Hyper-V’s context.
+    On the function that processes the VMEXIT once Hyper-V has saved the guest state. This allows the attacker to control the effects that Hyper-V has on the guest state after it has processed a VMEXIT.
+
+VMEXIT Entry Point Hook
+
+When the guest exits, this is the first piece of host code that is invoked. The purpose is to save all of the relevant guest state so it can be processed and restored later before resuming the virtual machine state.
+
+By placing a detour on the entry to the VMEXIT handling code, the attacker is able to intercept any VMEXITs before Hyper-V is even able to start preserving the guest state.
+
+This allows the attacker to safely VMRESUME without allowing the rest of the Hyper-V handler code to run without clobbering of the guest state. This is because the attacker can ensure that Hyper-V has not been able to set up any sort of state which would have to be cleaned up.
+
+Here is where all of the attacker’s intercepts for guest exits are implemented. If an exit is not handled by the implant, then it will be forwarded to the legitimate Hyper-V VMEXIT entry point where the second hook will be invoked.
+Hyper-V VMEXIT Processing Hook
+
+This hook is a detour of the function in Hyper-V that processes the actual exit after the entry point has preserved the guest state.
+
+This hook’s purpose is to ensure Hyper-V does not tamper with the malicious EPTP.
+
+This detour will unconditionally invoke the original Hyper-V handler, as it is the entry point hook that decides whether a VMEXIT can be processed by this function.
+
+Before the original handler is called, the original Hyper-V EPTP is loaded. This is to prevent Hyper-V from tampering with the malicious EPTP instead.
+
+After the original handler is called, the malicious EPTP for the current logical processor is always restored. This means that no matter what, the guest will always execute under the malicious EPTP after it has been set up.
+Implant Communication
+
+The implant exposes two distinct communication pathways, each operating at a different privilege boundary and serving a different purpose:
+
+    The first pathway allows a user‑mode component inside the guest OS to communicate with the implant by transitioning into the guest kernel. This is implemented by detouring ntoskrnl.exe!NtClose, providing a convenient syscall‑based entry point into the kernel‑resident portion of the implant. Running in the guest kernel grants access to Windows kernel APIs, making interactions with the operating system straightforward. However, this pathway is inherently guest‑controlled and therefore subject to inspection or interference by kernel‑mode security components.
+    The second pathway transitions from the same kernel‑resident implant into its VMX root counterpart. Execution in this context occurs outside of the guest OS, within the Hyper‑V environment, where it is isolated from guest‑level tampering. Communication across this boundary is performed using virtualization primitives (vmcall) rather than Windows kernel APIs.
+
+Guest User‑Mode -> Guest Kernel Implant Communication
+
+Certain operations require direct access to Windows kernel APIs (for example, functionality exported by ntoskrnl.exe). To support this, the attacker exposes a communication path from guest user‑mode into the kernel‑resident portion of the implant.
+
+This handler is implemented via an EPT hook on ntoskrnl.exe!NtClose, effectively repurposing the NtClose system call as a covert command channel. From the perspective of the cheat running in user‑mode, communication with the implant is performed by issuing a direct system call to NtClose, rather than invoking a conventional IOCTL or driver interface.
+__int64 __fastcall hook_NtClose(__int64 rcx0, __int64 a2, _QWORD *a3, size_t a4)
+{
+  g_ExecutingEPTHook = 1;
+  TrapFrame = KeGetCurrentThread()->TrapFrame;
+  if ( !TrapFrame || TrapFrame->SegCs != 0x33 || KeGetCurrentIrql() )
+    return NtClosePtr(rcx0, a2, a3);
+  
+  NtClose = (__int64 (__fastcall *)(__int64, _QWORD, _QWORD *, size_t))NtClosePtr;
+  v7 = a2;
+  
+  hook_NtClose_ProcessTimeoutHandler();
+  
+  v11 = rcx0;
+  if ( rcx0 != 0x19283EF938AB49EFLL )
+    return NtClose(v11, v7, a3, a4);
+  
+  GetCurrentThreadContext_WithMutex(&a1, 1);
+  if ( *(_QWORD *)a1.pContext )
+  {
+    v12 = CheckAddressInRange_120_128(*(__int64 *)a1.pContext, TrapFrame->Rip);
+    v13 = *(volatile signed __int32 **)a1.pWrapper;
+    v11 = 0x19283EF938AB49EFLL;
+    if ( !*(_QWORD *)a1.pWrapper )
+      goto LABEL_12;
+  }
+  else
+  {
+    v12 = 0;
+    v13 = *(volatile signed __int32 **)a1.pWrapper;
+    v11 = 0x19283EF938AB49EFLL;
+    if ( !*(_QWORD *)a1.pWrapper )
+      goto LABEL_12;
+  }
+  
+  if ( !_InterlockedExchangeAdd(v13 + 2, 0xFFFFFFFF) )
+  {
+    (*(void (__fastcall **)(volatile signed __int32 *))(*(_QWORD *)v13 + 16LL))(v13);
+    NegativeOne_Wrapper(v13);
+    v11 = 0x19283EF938AB49EFLL;
+  }
+  
+LABEL_12:
+  if ( !v12 )
+    return NtClose(v11, v7, a3, a4);
+  if ( a3 )
+    return KernelImplantHandleRequest(v7, a3, a4);
+  else
+    return 0xC0000008LL;
+}
+view raw
+hook_NtClose.c hosted with ❤ by GitHub
+
+Inside the game cheat, the syscall stub is implemented manually and uses a hard‑coded syscall ID of 0xF, corresponding to NtClose. A 64‑bit magic value (0x19283EF938AB49EF) is passed as part of the call and checked inside the hook_NtClose handler. In addition to the magic value comparison, the handler performs a range check to ensure the request originates from an expected address region.
+
+Note: NtClose syscall ID is 0xF for all of Windows 10 and 11.
+KernelImplantRequest proc near
+    sub     rsp, 38h
+    mov     r9d, ecx
+    mov     [rsp+38h+var_10], r8
+    mov     [rsp+38h+var_18], rdx
+    mov     r8, 19283EF938AB49EFh
+    mov     edx, 4
+    mov     ecx, 0Fh        ; NtClose
+    call    syscall_wrapper
+    test    rax, rax
+    setz    al
+    add     rsp, 38h
+    retn
+KernelImplantRequest endp
+view raw
+KernelImplantRequest.asm hosted with ❤ by GitHub
+
+If all validation checks inside hook_NtClose succeed, execution is redirected to KernelImplantHandleRequest, which implements the kernel‑mode helper routines used by the implant to service requests from user‑mode.
+__int64 __fastcall KernelImplantHandleRequest(IMPLANT_COMMAND a1, _QWORD *a2, size_t a3)
+{
+  if ( a2 && !(unsigned __int8)IsAddressValidInternal(a2) )
+    return 0xFFFFFFFFC0000001uLL;
+  if ( a1 > 0xE )
+  {
+    if ( a1 > 0x19 )
+    {
+      if ( a1 > 0x1F )
+      {
+        switch ( a1 )
+        {
+          case 0x20:
+            return CopyGlobalData_WithMutex_24ByteBlocks((__int64)a2);
+          case 0x21:
+            return CreateThreadWithStringBuffers_InMutex((__int64)a2);
+          case 0x22:
+            return MutexProtected_FreeAndMove_CallOffset60E0((__int64)a2);
+          default:
+            return 0xFFFFFFFFC0000001uLL;
+        }
+      }
+      else
+      {
+        switch ( a1 )
+        {
+          case CMD_TIME_DIVISION_1:
+            return TimeDivision_Calculate_1(a2);
+          case CMD_PROCESS_DATA_WITH_MUTEX:
+            return ProcessDataWithMutex_AndCallback(a2);
+          case CMD_TIME_DIVISION_2:
+            return TimeDivision_Calculate_2(a2);
+          default:
+            return 0xFFFFFFFFC0000001uLL;
+        }
+      }
+    }
+    else if ( a1 > 0x16 )
+    {
+      if ( a1 == 0x17 )
+      {
+        return DecryptAndProcessSection_ToBuffer((__int64)a2);
+      }
+      else if ( a1 == 0x18 )
+      {
+        return LazyImport_ResolveExport_Simple((__int64)a2);
+      }
+      else
+      {
+        return ExecuteCallback_Function2F190_4Params((__int64)a2);
+      }
+    }
+    else
+    {
+      switch ( a1 )
+      {
+        case 0xF:
+          return ValidateAddress_MmIsAddressValid_ReturnStatus();
+        case 0x10:
+          return CopyGlobalBuffer_77Bytes(a2, a3);
+        case 0x11:
+          return WriteBackGlobalBuffer_Offset49((__int64)a2);
+        default:
+          return 0xFFFFFFFFC0000001uLL;
+      }
+    }
+  }
+  else if ( a1 > CMD_INSTALL_EPT_HOOK_WITH_CONTEXT )
+  {
+    if ( a1 > 0xA )
+    {
+      switch ( a1 )
+      {
+        case 0xB:
+          return Unknown_Handler((__int64)a2);
+        case 0xC:
+          return InitializeDiskFilters_WithMultipleRetries(a2);
+        case 0xE:
+          return Execute_MemcopyInThreadContext((__int64)a2);
+        default:
+          return 0xFFFFFFFFC0000001uLL;
+      }
+    }
+    else if ( a1 == CMD_REMOVE_EPT_HOOK_VALIDATED )
+    {
+      return RemoveEptHook_WithThreadContext_ValidatePointer(a2);
+    }
+    else if ( a1 == CMD_HANDLE_DEVICE_IO )
+    {
+      return HandleDeviceIoRequest_WithRetries(a2);
+    }
+    else
+    {
+      return ThreadCreation_ResolveExports_AllocateWithTracking((__int128 *)a2);
+    }
+  }
+  else if ( a1 > CMD_CHECK_HOOKABLE )
+  {
+    switch ( a1 )
+    {
+      case CMD_PROCESS_PATH:
+        return ProcessPath_ConvertLowercase_AddToList_PS((__int64)a2);
+      case CMD_CONVERT_STRING:
+        return ConvertStringToStdString_AndProcess(a2);
+      case CMD_INSTALL_EPT_HOOK_WITH_CONTEXT:
+        return InstallEptHook_WithThreadContext_AllocStruct150((__int64)a2);
+      default:
+        return 0xFFFFFFFFC0000001uLL;
+    }
+  }
+  else
+  {
+    switch ( a1 )
+    {
+      case CMD_CREATE_EPT_HOOK:
+        return CreateEptHook_InThreadContext((__int64)a2);
+      case CMD_REMOVE_EPT_HOOK:
+        return RemoveEptHook_InThreadContext(a2);
+      case CMD_CHECK_HOOKABLE:
+        return CheckHookable_Vmcall((char *)a2);
+      default:
+        return 0xFFFFFFFFC0000001uLL;
+    }
+  }
+}
+view raw
+KernelImplantHandleRequest.c hosted with ❤ by GitHub
+Kernel Implant -> VMX Root Communication
+
+This communication pathway exists exclusively for kernel guest → vmxroot requests. It is used when the guest kernel–resident implant (kernel guest) needs to invoke functionality implemented in the hypervisor‑resident implant (vmxroot / VMX root). No user‑mode code interacts with this interface directly.
+
+Communication is implemented using VMCALL. Any execution of VMCALL from the guest results in a VM‑exit into Hyper‑V’s execution context. Upon this exit, the hypervisor‑resident handler inspects the VM‑exit state and determines whether the VMCALL originated from within the kernel implant’s expected code range. Only if this range check succeeds is the exit treated as a valid implant request.
+
+If the VMCALL does not originate from the implant’s address range, the exit is handled as a non‑implant event, preventing arbitrary guest kernel code or security software from invoking the interface. At this level, Windows kernel APIs are unavailable, but execution is isolated from the guest OS and resistant to guest‑level tampering.
+
+The kernel guest → vmxroot interface is intentionally minimal. Most implant functionality depends on Windows kernel APIs and therefore remains in the guest‑kernel communication path. The hypervisor‑resident handler supports only a small set of highly privileged operations:
+
+    Read the guest’s current CR3
+    Write the guest’s current CR3
+    Copy memory between guest physical addresses
+    Update a single EPT page‑table entry (including permissions and host page‑frame number)
+
+The following snippet shows the VMCALL handler responsible for servicing these kernel guest → vmxroot requests:
+__int64 __fastcall vmcall_handler(__int64 trap_frame)
+{
+  unsigned __int64 *implant_info; // rsi
+  unsigned __int64 guest_rip; // rax
+  __int64 code; // rax
+
+  if ( *(_QWORD *)(dereference_pointer(trap_frame) + 0x78) == 0xDEADBEEFDEADBEEFuLL
+    && (implant_info = *(unsigned __int64 **)::implant_info[0],
+        guest_rip = get_guest_rip(trap_frame),
+        check_address_range(implant_info, guest_rip)) )// check if implant is making the call
+  {
+    code = *(_QWORD *)(dereference_pointer(trap_frame) + 8);
+    LOBYTE(implant_info) = 1;
+    if ( code > 1 )
+    {
+      if ( code == 2 )
+      {
+        read_guest_cr3(trap_frame);
+      }
+      else if ( code == 4 )
+      {
+        copy_guest_physical_memory(trap_frame);
+      }
+    }
+    else if ( code )
+    {
+      if ( code == 1 )
+        write_guest_cr3(trap_frame);
+    }
+    else
+    {
+      update_epte_and_invept(trap_frame);
+    }
+  }
+  else
+  {
+    LODWORD(implant_info) = 0;
+  }
+  return (unsigned int)implant_info;
+}
+view raw
+vmcall_handler.c hosted with ❤ by GitHub
+Process Injection - Overview
+
+The attacker tampers with the game process by injecting a DLL (dynamic link library). The cheat logic is implemented within that injected DLL.
+
+The injection works by making a clone of the process page tables. This clone is tampered by inserting malicious page table entries which map the DLL in. As the page table containing the DLL is separate from the main process page tables, it won’t be scanned for these malicious entries.
+
+The main issue for the attacker here is hiding the fact that the process is executing under these cloned page tables from the anticheat.
+Cloning Target Game Page Tables
+
+When injection begins on a target process, a copy of the target process’s PML4 is made. In this copy, page table entries are populated with the allocation of the DLL This means that in these copy page tables the DLL can execute. This copy will be referred to as the malicious page tables.
+current_process_cr3 = __readcr3();
+*(_QWORD *)(process_context + 80) = current_process_cr3;
+
+// pml4 allocation
+*(_QWORD *)(process_context + 64) = Allocate_AlignedMemory(4096, 0x1000u);
+v20 = GuestVA_To_HostPA(*(_QWORD *)(process_context + 80) & 0xFFFFFFFFF000LL);
+
+// copy current process pml4 to the newly allocated one
+memmove(*(void **)(process_context + 64), v20, 0x1000u);
+pml4_copy_allocation = *(_QWORD *)(process_context + 64);
+
+current_process_cr3_0 = __readcr3();
+result = GuestCR3_TranslateVA_To_PA(pml4_copy_allocation, current_process_cr3_0) & 0xFFFFFFFFF000LL;
+*(_QWORD *)(process_context + 56) = result | *(_QWORD *)(process_context + 56) & 0xFFFF000000000FFFuLL;
+view raw
+page_tables_cloning.c hosted with ❤ by GitHub
+Insertion of Malicious Page Table Entries
+
+Once the malicious page tables are created, the DLL is mapped within them. This allows the DLL to be executed by the CPU when the malicious page tables are loaded.
+if ( page_count >= 0x1000 )
+{
+    pages_left = page_count >> 12;
+    current_allocation_address = allocation_virtual_base_address;
+    do
+    {
+      // a1[7] contains the PML4 copy, and is the cr3 where the changes are applied
+      potentially_the_pte = AllocatePageTableEntry_RecursiveSetup(
+                              (__int64)a1[7], 
+                              current_allocation_address,
+                              1u,
+                              a1 + 15,
+                              0);
+
+      *(_QWORD *)potentially_the_pte = (physical_address & 0xFFFFFFFFF000LL) // set the pfn
+                                     // mask out execute disable bit (& others), so execute is allowed
+                                     + (*(_QWORD *)potentially_the_pte & 0x7FFF000000000FF8LL)
+                                     + 7; // supervisor set, write set, present set
+                                     
+      invlpg(current_allocation_address);
+      physical_address += 4096LL;
+      current_allocation_address += 4096LL;
+      --pages_left;
+    }
+    while ( pages_left );
+}
+view raw
+page_table_entry_insertion.c hosted with ❤ by GitHub
+Loading of Malicious Page Table
+
+This malicious page tables contains the DLL mappings, but the game is still executing under the original page tables. For the DLL to be able to execute, the malicious page table must be loaded.
+
+If the DLL attempts to execute under the original page tables, a page fault exception will be thrown. The trick that the attacker is using here is intercepting this page fault to detect when their DLL is attempting to execute and loading the malicious page tables
+
+Within the Windows kernel’s page fault handler (ntoskrnl.exe!KiPageFault), a call is made to ntoskrnl.exe!MmAccessFault. ntoskrnl.exe!MmAccessFault is responsible for processing accesses to invalid memory. This is the same routine that will be called when the DLL attempts to execute under the original page tables.
+
+The attacker hooks this call to ntoskrnl.exe!MmAccessFault to be able to intercept any page faults, including when their DLL is executed under the original page tables. In the hook detour, they are able to load the malicious page tables that contain the DLL mappings. This will mean that they can now execute their DLL as it is mapped within the current context.
+Call to Hypervisor For Loading Page Tables
+
+The CR3 special register describes the current page tables to be used by the CPU. A call is made to the hypervisor to load the CR3 containing the malicious page tables in this page fault detour:
+
+call    get_process_context
+mov     rcx, rax
+call    get_process_copy_cr3 ; returns malicious CR3 in rax
+mov     ecx, 1 ; load hypercall code
+mov     rdx, rax ; load malicious CR3 as first hypercall parameter
+xor     r8d, r8d
+xor     r9d, r9d
+call    execute_vmcall_hypercall
+
+This uses the host-based communication handler of the implant to invoke the write_guest_cr3 routine. ECX contains the hypercall code (1) and rdx contains the first parameter, the malicious CR3. The implant will then process this VMCALL and set the guest CR3 to the malicious CR3.
+
+__int64 __fastcall HandleHvCallVmwriteGuestCR3(__int64 a1)
+{
+  __int64 GuestRegisterState; // rax
+  _QWORD v3[3]; // [rsp+20h] [rbp-18h] BYREF
+
+  GuestRegisterState = GetGuestRegisterState(a1);
+  vmwrite(GUEST_CR3, *(_QWORD *)(GuestRegisterState + 16));
+  v3[0] = (unsigned __int16)GetCurrentVpid();
+  v3[1] = 0LL;
+  return invvpid(InvvpidSingleContextRetainingGlobals, v3);
+}
+
+Hiding Malicious Page Tables
+
+Once the malicious page tables are loaded into the guest CR3 register, the value could be checked against what the guest CR3 should be. This would allow an anticheat to detect the loading of the malicious page tables.
+
+To evade this, the attacker hides the true value of the guest CR3 register. This allows them to execute under the malicious page tables with the guest not being able to check by simply reading the CR3 register.
+
+To do this, they intercept the reads to the guest CR3 register using the hypervisor implant.
+CR3 Read Interception
+
+Whenever the guest reads the value of the CR3 register, the hypervisor implant will intercept this. If the value in the guest CR3 register is equal to the attacker’s malicious CR3, then the value will be spoofed to the original process CR3 for the read. By doing this, the true value of the guest CR3 register is hidden so it becomes a lot more difficult to detect the execution under the malicious page tables.
+
+Below is the snippet of the read handler:
+  if ( ((exit_qualification0 >> 4) & 3) == 1 )// if it is a read to cr3
+  {
+    guest_cr3 = read_guest_cr3();
+    sub_140022770(exit_qualification, 0);
+    if ( exit_qualification[0] )
+    {
+      v5 = get_process_context((__int64)exit_qualification[0]);
+      if ( ((guest_cr3 ^ get_process_copy_cr3(v5)) & 0xFFFFFFFFF000LL) == 0 )// if guest cr3 == the copy cr3
+      {
+        process_context = get_process_context((__int64)exit_qualification[0]);
+        guest_cr3 = get_process_original_cr3(process_context);// set cr3 back to original cr3
+      }
+    }
+    v7 = exit_qualification[1];
+    if ( exit_qualification[1]
+      && !_InterlockedExchangeAdd((volatile signed __int32 *)&exit_qualification[1]->Header.WaitListHead, 0xFFFFFFFF) )
+    {
+      (*(void (__fastcall **)(_KPROCESS *))(*(_QWORD *)&v7->Header._union_1.Lock + 16LL))(v7);
+      DereferenceAndFreeKernelObject(v7);
+    }
+    general_purpose_register = (exit_qualification0 >> 8) & 0xF;
+    if ( (_DWORD)general_purpose_register == 4 )// if rsp
+      vmwrite(26652, guest_cr3);
+    else
+      *(_QWORD *)(get_guest_register_value(a1) + 8 * general_purpose_register) = guest_cr3;// set register in context to the new cr3
+    LOBYTE(guest_cr3) = 1;
+    return (unsigned int)guest_cr3;
+  }
+LABEL_17:
+  LODWORD(guest_cr3) = 0;
+  return (unsigned int)guest_cr3;
+view raw
+cr3_read_interception.c hosted with ❤ by GitHub
+CR3 Write Interception
+
+Some anticheats will change the process’s CR3 past whatever value Windows assigned it to make it harder for an attacker to be able to translate the process’s virtual memory. This is crucial for the attacker to handle because if the copy of the game’s page tables is outdated/inaccurate, then the DLL won’t be able to interact with game memory. This would lead to crashes and inability to carry out cheat functions.
+
+To solve this, the attacker intercepts writes to the CR3 register to be able to track whatever CR3 value the game uses.
+
+Whenever a guest CR3 value is written in the game process, the malicious page tables are synchronised with it so any new mappings are acquired. This allows the malicious page tables to have an up to date copy of the process page table mappings, even if the game were to shuffle them every certain amount of time.
+
+This also serves as a form of evading detection, because the spoofed value of the guest CR3 will always be up to date with whatever value the game uses. Now it will be harder for an anticheat to compare the expected guest CR3 value with the spoofed one.
+
+There are ways to detect this synchronisation of page tables though, as will be talked about later in the post.
+
+Here is the snippet for the write interception:
+if ( current_thread )
+{
+  // if current process == target process
+  if ( get_current_process_object((__int64)exit_qualification[0]) == *(_QWORD *)(current_thread + 184) )
+  {
+    process_context = get_process_context((__int64)exit_qualification[0]);
+    page_directory_number = (cr3_value_to_write >> 12) & 0xFFFFFFFFFLL;
+
+    // if written cr3 value is not equal to copy cr3
+    if ( (((unsigned __int64)get_process_copy_cr3(process_context) >> 12) & 0xFFFFFFFFFLL) != page_directory_number )
+    {
+      process_context0 = get_process_context((__int64)exit_qualification[0]);
+      set_process_original_cr3(process_context0, cr3_value_to_write);
+      pml4_mapped = map_guest_physical_to_host_virtual(page_directory_number << 12);
+      process_context1 = get_process_context((__int64)exit_qualification[0]);
+
+      // sync copy page tables with real one
+      if ( sync_page_tables(process_context1, pml4_mapped) )
+        invvpid(2, &qword_1402DFC88);
+    }
+  }
+}
+view raw
+cr3_write_interception.c hosted with ❤ by GitHub
+
+Here is the snippet for the page tables synchronization:
+char __fastcall sync_page_tables(__int64 process_context, __int64 original_pml4_mapped)
+{
+  __int64 index; // r8
+  char has_updated; // al
+  __int64 copy_pml4; // r9
+  __int64 pml4e; // r10
+  __int64 copy_pml4_0; // r10
+  __int64 v7; // r11
+
+  index = 0;
+  has_updated = 0;
+  do
+  {
+    if ( index != *(_DWORD *)(process_context + 72) )// if index != reserved pml4e
+    {
+      copy_pml4 = *(_QWORD *)(process_context + 64);
+      pml4e = *(_QWORD *)(original_pml4_mapped + 8 * index);
+      if ( *(_QWORD *)(copy_pml4 + 8 * index) != pml4e )
+      {
+        *(_QWORD *)(copy_pml4 + 8 * index) = pml4e;
+        has_updated = 1;
+      }
+    }
+    if ( index + 1 != *(_DWORD *)(process_context + 72) )// if index != reserved pml4e
+    {
+      copy_pml4_0 = *(_QWORD *)(process_context + 64);
+      v7 = *(_QWORD *)(original_pml4_mapped + 8 * index + 8);
+      if ( *(_QWORD *)(copy_pml4_0 + 8 * index + 8) != v7 )
+      {
+        *(_QWORD *)(copy_pml4_0 + 8 * index + 8) = v7;
+        has_updated = 1;
+      }
+    }
+    index += 2;
+  }
+  while ( index != 512 );
+  return has_updated & 1;
+}
+view raw
+sync_page_tables.c hosted with ❤ by GitHub
+Hiding Memory Contents Through EPT
+
+EPT allows the attacker to hide the true contents of memory from the guest. The attacker hides the contents of the guest physical memory that contains the DLL executable pages via EPT. This means that any reads made to the DLL executable pages in the guest will show fake contents.
+
+The attacker sets the visible page (readable and writable) to be filled entirely with 0xCE bytes. If an anticheat were to scan physical memory, they would find these pages filled with 0xCE bytes instead of the actual instructions of the DLL (although one could argue that the pages filled with one value is even more telling).
+shadow_page = get_or_allocate_shadow_page(
+                              (__int64)ept_hook_info,
+                              (const void *)(section_offset + section_virtual_address));
+
+memmove(shadow_page, (const void *)(section_offset + section_virtual_address), 0x1000u);
+memset((void *)(section_offset + section_virtual_address), 0xCE, 0x1000u);
+view raw
+setup_shadow_page.c hosted with ❤ by GitHub
+Game Cheat Entry Point Stub
+
+Once the DLL is injected into the process, a stub is allocated to load the arguments and call the entry point.
+
+The attacker hijacks a game thread when it makes certain system calls, this allows it to redirect execution to this entry point stub.
+
+This stub is given a hijacked context, so it must not corrupt any of the intercepted state. The stub pushes all flags and general purpose registers, then proceeds to call the entry point of the DLL.
+
+After the entry point has returned, it restores the full context before jumping back to the hijacked RIP. This allows it to continue code execution with no disruption to the hijacked code location.
+
+A disassembly of the stub is given below:
+pushfq
+push   rax
+push   rcx
+push   rdx
+push   rbx
+push   0xffffffffffffffff ; placeholder for rsp
+push   rbp
+push   rsi
+push   rdi
+push   r8
+push   r9
+push   r10
+push   r11
+push   r12
+push   r13
+push   r14
+push   r15
+mov    rbx,rsp ; save frame pointer
+and    rsp,0xfffffffffffffff0 ; align stack pointer
+movabs r8,0x0 ; reserved
+movabs rdx,0x1 ; DLL_PROCESS_ATTACH
+movabs rcx,0xffffffffffffffff ; module argument
+movabs rax,0xffffffffffffffff ; load entry point address
+sub    rsp,0x30
+call   rax
+add    rsp,0x30
+mov    rsp,rbx
+pop    r15
+pop    r14
+pop    r13
+pop    r12
+pop    r11
+pop    r10
+pop    r9
+pop    r8
+pop    rdi
+pop    rsi
+pop    rbp
+add    rsp,0x8
+pop    rbx
+pop    rdx
+pop    rcx
+pop    rax
+popfq
+jmp    QWORD PTR [rip+0xffffffffffffffff] ; jump back to interrupted / hijacked RIP
+view raw
+entry_point_stub.asm hosted with ❤ by GitHub
+EPT Hooks
+
+The implant installs multiple EPT-based hooks across the Windows kernel by manipulating EPT execute permissions and redirecting execution when a hooked page is accessed. Two distinct hook implementations are used, depending on the requirements of the target site.
+Inline Hook (Relocation) EPT Hook
+
+The first hook type combines EPT execution control with traditional inline patching and relocation of the first few instructions of a target routine. Execution proceeds as follows:
+
+    An EPT hook is placed on the target code page to secretly modify execution.
+    The first instructions of the target function are replaced with a JMP to the detour routine.
+    The overwritten instructions are copied into a trampoline.
+    The detour executes the original instructions from the trampoline.
+    Control then jumps back to the original function, immediately after the inserted JMP.
+
+Shellcode-Based (Full-Context) EPT Inline Hook
+
+The second hook type installs an inline JMP that redirects execution into a shellcode stub which fully preserves guest CPU state before invoking the detour. Unlike the first hook type, this mechanism is not limited to function entry points and can be placed at arbitrary instruction boundaries within a function body. Execution proceeds as follows:
+
+    An EPT hook is used to safely patch the target code page.
+    A 14-byte absolute JMP is written at an arbitrary instruction boundary, including mid-function locations.
+    Execution is redirected to a shellcode stub.
+    The stub saves the complete architectural state of the guest
+    The detour callback is invoked with no assumptions about calling convention or live register usage.
+    The full CPU state is restored.
+    The overwritten instructions are executed from relocated code.
+    Execution resumes at the instruction immediately following the hook site.
+
+This is one of the functions used to install a full-context EPT inline hook:
+__int64 __fastcall EptInstallFullContextHook_KiDispatchException(
+        HOOK_CONTEXT **ppHookContext,
+        void *pTargetFunction,
+        __int64 detourFunction,
+        char bInlineHook)
+{
+  HOOK_CONTEXT *v9; // r15
+  size_t v10; // r15
+  size_t v11; // rax
+  _QWORD pShellcode[71]; // [rsp+30h] [rbp-238h] BYREF
+
+  if ( IsHookAlreadyInstalled(ppHookContext) )
+    return 0LL;
+  v9 = (HOOK_CONTEXT *)malloc(0x140uLL);
+  InitializeHookContext(v9);
+  *ppHookContext = v9;
+  memmove(pShellcode, &EPT_Hook_Shellcode_Stub, &EPT_Hook_Shellcode_Stub_End - &EPT_Hook_Shellcode_Stub);
+  v10 = &EPT_Hook_Shellcode_Stub_End - &EPT_Hook_Shellcode_Stub;
+  if ( &EPT_Hook_Shellcode_Stub_End != &EPT_Hook_Shellcode_Stub )
+  {
+    v11 = 0LL;
+    // Scan for magic value in shellcode to replace it with detour function
+    do
+    {
+      if ( *(_QWORD *)((char *)pShellcode + v11) == 0x1E38EDFF2301EEBCLL )
+        *(_QWORD *)((char *)pShellcode + v11) = detourFunction;
+      ++v11;
+    }
+    while ( v11 < v10 );
+  }
+  return EptInstallHook_WithRelocation(*ppHookContext, pTargetFunction, pShellcode, v10, bInlineHook, 1u);
+}
+view raw
+EptInstallFullContextHook_KiDispatchException.c hosted with ❤ by GitHub
+
+Here is what the shellcode looks like that is used for these full-context EPT hooks:
+EPT_Hook_Shellcode_Stub:
+                push    rax
+                push    rcx
+                push    rdx
+                push    rbx
+                push    rbp
+                push    rsi
+                push    rdi
+                push    r8
+                push    r9
+                push    r10
+                push    r11
+                push    r12
+                push    r13
+                push    r14
+                push    r15
+                pushfq                  ; Save RFLAGS
+                mov     rsi, rcx
+                mov     rcx, rsp
+                add     rcx, 80h
+                push    rcx
+                mov     rcx, rsp
+                mov     rbx, rsp
+                and     rsp, 0FFFFFFFFFFFFFFF0h
+                sub     rsp, 200h
+                fxsave  dword ptr [rsp] ; Save FPU/SSE state (512 bytes)
+                movaps  xmm6, xmm5
+                movaps  xmm5, xmm4
+                movaps  xmm4, xmm3
+                movaps  xmm3, xmm2
+                movaps  xmm2, xmm1
+                movaps  xmm1, xmm0
+                lea     rbp, [rbx+88h]
+                add     rbp, 8
+                mov     rax, [rbp+40h]
+                push    rax
+                mov     rax, [rbp+38h]
+                push    rax
+                mov     rax, [rbp+30h]
+                push    rax
+                mov     rax, [rbp+28h]
+                push    rax
+                mov     rax, [rbp+20h]
+                push    rax
+                push    r9
+                mov     r9, r8
+                mov     r8, rdx
+                mov     rdx, rsi
+                sub     rsp, 20h        ; Prepare x64 calling convention
+                mov     rax, 1E38EDFF2301EEBCh ; PATCHED: Callback function address (placeholder = 0x1E38EDFF2301EEBC)
+                call    rax             ; Call hook handler
+                mov     rdi, 1E38EDFF2301EEBCh ; PATCHED: Callback function pointer copy
+                add     rsp, 20h
+                add     rsp, 30h
+                cmp     eax, 0          ; Check if should skip original function
+                jz      short loc_14026080F
+                fxrstor dword ptr [rsp] ; Restore path if returning to original
+                mov     rsp, rbx
+                add     rsp, 8
+                popfq
+                pop     r15
+                pop     r14
+                pop     r13
+                pop     r12
+                pop     r11
+                pop     r10
+                pop     r9
+                pop     r8
+                pop     rdi
+                pop     rsi
+                pop     rbp
+                pop     rbx
+                pop     rdx
+                pop     rcx
+                pop     rax
+                retn
+loc_14026080F:
+                fxrstor dword ptr [rsp]
+                mov     rsp, rbx
+                add     rsp, 8
+                popfq
+                pop     r15
+                pop     r14
+                pop     r13
+                pop     r12
+                pop     r11
+                pop     r10
+                pop     r9
+                pop     r8
+                pop     rdi
+                pop     rsi
+                pop     rbp
+                pop     rbx
+                pop     rdx
+                pop     rcx
+                pop     rax
+EPT_Hook_Shellcode_Stub_End db    0
+view raw
+EPT_Hook_Shellcode_Stub.asm hosted with ❤ by GitHub
+All Hooks
+
+This is a list of all EPT hooks installed. Most of them are Spoofer related, some of them hide screenshots from anti cheats, and others are for core functionality of the bypass system.
+
+    IopCreateFile
+    IopXxxControlFile
+    PsWatchWorkingSet
+    MmAccessFault
+    MiProcessLoaderEntry
+    NtGdiBitBlt
+    NtGdiStretchBlt
+    NtDCompositionBeginFrame
+    DpiDxgkDdiQueryDeviceDescriptor
+    MmProtectVirtualMemory
+    NtQueryValueKey
+    NtOpenKey
+    MmCleanProcessAddressSpace
+    ReadPartitionTable
+    IofCallDriver
+    IofCompleteRequest
+    classnpnp!ClassGlobalDispatch
+    partmgr!PmReadPartitionTable
+    NdisReadConfiguration
+    NdisMSetMiniportAttributes
+    NsiGetAllParameters
+    NsiEnumerateObjectsAllParametersEx
+    KiDispatchException
+    KiSystemCall64_ServiceExit
+    VrpIoctlDeviceDispatch
+
+Hooks on nvlddmkm.sys (Nvidia Driver)
+
+Some special hooks are done on nvlddmkm.sys, they signature scan for the following:
+
+    81 BB 10 06 01 00 D2 6A C6 A7
+    BA D2 6A C6 A7
+
+The goal is to intercept or patch the validation/extraction of the GID, which is a 16-byte value prefixed by the magic signature 0xA7C66AD2 (PMU_SHA1_GID_SIGNATURE). This GID feeds directly into UUID/serial generation.
+Hook_KiDispatchException
+
+A full-context EPT hook is placed on KiDispatchException to gracefully resolve memory access faults triggered by the guest kernel implant. This mechanism effectively serves as a custom exception handler for implant-generated faults.
+
+Several helper routines within the implant perform potentially unsafe memory reads and writes through small MASM stub functions of varying byte sizes. Prior to executing these operations, a magic constant (0x9EFABE87C1FE38E2) is placed into r10 as an identifier. If the operation completes successfully, execution continues normally. However, if a fault occurs (for example, due to an invalid or unmapped address), control eventually reaches the hooked KiDispatchException.
+TryCopyQword    proc near
+                mov     r10, 9EFABE87C1FE38E2h
+                mov     eax, 3
+                mov     rax, [rcx]
+                mov     [rdx], rax
+                mov     eax, 0
+                cmp     r10, 1337h
+                jz      short loc_14004FA30
+                mov     eax, 1
+loc_14004FA30:
+                xor     r10, r10
+                retn
+TryCopyQword    endp
+view raw
+TryCopyQword.asm hosted with ❤ by GitHub
+
+When the hook detects that the exception originated from within the implant’s code region, it treats the fault as expected and handles it internally rather than allowing standard kernel exception processing to proceed. In this case:
+
+    Check if the faulting RIP is within the implant range
+    r10 is overwritten with 0x1337 to signal failure to the caller
+    The faulting helper returns ContinueExecution
+    RIP is advanced past the faulting memory access instruction to prevent re-execution
+
+This allows the implant to safely probe or manipulate memory without risking a system crash or invoking normal Windows exception dispatching paths. Any exceptions originating outside the implant’s address range are ignored by the hook and passed through to the legitimate kernel handler unmodified, ensuring normal system behavior is preserved.
+__int64 __fastcall Hook_KiDispatchException(HOOK_REGISTER_CONTEXT *pHookContext)
+{
+  // [COLLAPSED LOCAL DECLARATIONS. PRESS NUMPAD "+" TO EXPAND]
+
+  g_ExecutingEPTHook = 1;
+  pExceptionCode = (int *)pHookContext->pExceptionCode;
+  bHandled = 0;
+  
+  if ( !pExceptionCode )
+    return bHandled;
+  
+  if ( !pHookContext->pContextRecord )
+    return bHandled;
+  
+  pTrapFrame = (_QWORD *)pHookContext->pTrapFrame;
+  if ( !pTrapFrame )
+    return bHandled;
+  
+  PreviousMode = pHookContext->exceptionFlags;
+  FaultingRIP = pTrapFrame[45];
+  
+  // Perform range check on faulting RIP + check R10 for magic value
+  if ( IsAddressInModuleRange(*(unsigned __int64 **)pModule_R1Implant[0], FaultingRIP)
+    && pTrapFrame[11] == 0x9EFABE87C1FE38E2uLL )
+  {
+    pTrapFrame[45] += pTrapFrame[6] & 0xFLL;
+    pTrapFrame[11] = 0x1337LL;
+LABEL_29:
+    pHookContext->pExceptionRecord = 0LL;
+    return 1;
+  }
+  
+  KernelSpaceBase = ((unsigned __int64)(unsigned int)dword_1402DA060 << 39) | 0xFFFF000000000000uLL;
+  if ( (dword_1402DA060 & 0x100) == 0 )
+    KernelSpaceBase = (unsigned __int64)(unsigned int)dword_1402DA060 << 39;
+  
+  if ( KernelSpaceBase <= FaultingRIP && KernelSpaceBase + 0x8000000000LL > FaultingRIP )
+  {
+    GetTebContext_CheckThreadMatch_ReturnGlobals(&ThreadContext, 1);
+    if ( *(_QWORD *)ThreadContext.pContext
+      && IsAddressInProtectedRegions(*(__int64 *)ThreadContext.pContext, FaultingRIP)
+      && pTrapFrame[11] == 0x9EFABE87C1FE38E2uLL )
+    {
+      pTrapFrame[45] += pTrapFrame[6] & 0xFLL;
+      pTrapFrame[11] = 0x1337LL;
+      pTebWrapperRefCount1 = *(volatile signed __int32 **)ThreadContext.pWrapper;
+      if ( *(_QWORD *)ThreadContext.pWrapper
+        && !_InterlockedExchangeAdd((volatile signed __int32 *)(*(_QWORD *)ThreadContext.pWrapper + 8LL), 0xFFFFFFFF) )
+      {
+        (*(void (__fastcall **)(volatile signed __int32 *))(*(_QWORD *)pTebWrapperRefCount1 + 16LL))(pTebWrapperRefCount1);
+        NegativeOne_Wrapper(pTebWrapperRefCount1);
+      }
+      goto LABEL_29;
+    }
+    pTebWrapperRefCount2 = *(volatile signed __int32 **)ThreadContext.pWrapper;
+    if ( *(_QWORD *)ThreadContext.pWrapper
+      && !_InterlockedExchangeAdd((volatile signed __int32 *)(*(_QWORD *)ThreadContext.pWrapper + 8LL), 0xFFFFFFFF) )
+    {
+      (*(void (__fastcall **)(volatile signed __int32 *))(*(_QWORD *)pTebWrapperRefCount2 + 16LL))(pTebWrapperRefCount2);
+      NegativeOne_Wrapper(pTebWrapperRefCount2);
+    }
+  }
+  
+  TranslatedStatus = TranslateErrorToNtStatus(*pExceptionCode);
+  
+  if ( TranslatedStatus > (int)0xC0000093 )
+  {
+    if ( TranslatedStatus != 0xC0000094 && TranslatedStatus != 0xC00000FD && TranslatedStatus != 0xC0000096 )
+      return bHandled;
+  }
+  else
+  {
+    StatusOffset = (unsigned int)(TranslatedStatus + 0x3FFFFFFB);
+    if ( (unsigned int)StatusOffset > 0x18
+      || (AllowedExceptionMask = 0x1000003LL, !_bittest((const int *)&AllowedExceptionMask, StatusOffset)) )
+    {
+      if ( (unsigned int)(TranslatedStatus + 0x7FFFFFFF) >= 2 )
+        return bHandled;
+    }
+  }
+  
+  if ( (unsigned __int8)Hook_KiDispatchException_AllocateContext_CheckPS(
+                          StatusOffset,
+                          AllowedExceptionMask,
+                          (__int64)pTrapFrame,
+                          PreviousMode) )
+    goto LABEL_29;
+  return bHandled;
+}
+view raw
+Hook_KiDispatchException.c hosted with ❤ by GitHub
+hook_KiSystemCall64_ServiceExit
+
+This full-context EPT hook targets KiSystemCall64 and is responsible for bypassing Windows instrumentation callbacks when system calls are issued directly from the injected game cheat payload. Remember that the game cheat payload directly syscalls for communication purposes with the kernel implant. To avoid this visibility, the implant locates and hooks the syscall exit path inside ntoskrnl. The following signature is used to identify the relevant code sequence:
+
+; 4C 8B 95 E8 ? ? ? 48 89 85 E8
+mov     rax, gs:188h    ; Read current thread
+mov     rax, [rax+0B8h] ; Read current process
+mov     rax, [rax+3D8h] ; Read InstrumentationCallback
+or      rax, rax
+jz      short loc_140412AB5
+cmp     word ptr [rbp+0F0h], 33h
+jnz     short loc_140412AB5
+; RBP+0xE8 contains the address to sysret
+mov     r10, [rbp+0E8h] ; <-- EPT full-context hook on this instruction
+mov     [rbp+0E8h], rax
+
+Under normal operation, if an instrumentation callback is registered for the current process, this code replaces the sysret address stored at [rbp+0xE8] with the callback pointer. As a result, execution is redirected through the instrumentation handler before finally returning to the instruction after the original syscall instruction.
+
+The implant intercepts this logic by placing an EPT full-context hook on the instruction that loads the original return address (mov r10, [rbp+0E8h]). When triggered, the hook manipulates the value written back to [rbp+0E8h] by altering RAX, ensuring that the instrumentation callback is never invoked. Instead, the original syscall return path is preserved, allowing execution to return directly to the game cheat payload after the syscall completes.
+__int64 __fastcall hook_KiSystemCall64_ServiceExit(EPT_HOOK_CONTEXT *pHookContext)
+{
+  __int64 SavedRbp; // rdi
+  volatile signed __int32 *pTebWrapperRefCount; // rsi
+  ThreadContextPair ThreadContext; // [rsp+28h] [rbp-20h] BYREF
+
+  SavedRbp = pHookContext->Rbp;
+  GetTebContext_CheckThreadMatch_ReturnGlobals(&ThreadContext, 1);
+  if ( *(_QWORD *)ThreadContext.pContext
+    && IsAddressInProtectedRegions(*(__int64 *)ThreadContext.pContext, *(_QWORD *)(SavedRbp + 0xE8)) )
+  {
+    pHookContext->Rax = *(_QWORD *)(SavedRbp + 0xE8);
+  }
+  pTebWrapperRefCount = *(volatile signed __int32 **)ThreadContext.pWrapper;
+  if ( *(_QWORD *)ThreadContext.pWrapper
+    && !_InterlockedExchangeAdd((volatile signed __int32 *)(*(_QWORD *)ThreadContext.pWrapper + 8LL), 0xFFFFFFFF) )
+  {
+    (*(void (__fastcall **)(volatile signed __int32 *))(*(_QWORD *)pTebWrapperRefCount + 0x10LL))(pTebWrapperRefCount);
+    NegativeOne_Wrapper(pTebWrapperRefCount);
+  }
+  return 0LL;
+}
+view raw
+hook_KiSystemCall64_ServiceExit.c hosted with ❤ by GitHub
+
+You can read more about instrumentation callbacks here:
+
+    https://github.com/Deputation/instrumentation_callbacks
+    https://xacone.github.io/mitigate-indirect-syscalls.html
+    https://winternl.com/detecting-manual-syscalls-from-user-mode/
+
+hook_NtGdiBitBlt & hook_NtGdiStretchBlt
+
+The NtGdiBitBlt and NtGdiStretchBlt hooks are used to intercept GDI blits associated with screenshots. Blits smaller than 151 pixels in either dimension are ignored. Relevant blit parameters are forwarded to user-mode through a shared communication block, allowing the cheat to react before the capture completes.
+BOOL __fastcall Hook_NtGdiBitBlt(
+    HDC   hdcDst,
+    int   x,
+    int   y,
+    int   cx,
+    int   cy,
+    HDC   hdcSrc,
+    int   xSrc,
+    int   ySrc,
+    DWORD rop4,
+    DWORD crBackColor,
+    FLONG fl)
+{
+    auto NtGdiBitBlt_Original =
+        (BOOL(__fastcall*)(HDC,int,int,int,int,HDC,int,int,DWORD,DWORD,FLONG))
+        qword_1402DD640;
+
+    ThreadContext ctx{};
+    GetCurrentThreadContext_WithMutex(&ctx, 1);
+
+    // Ignore small captures
+    if (cx < 151 ||
+        cy < 151 ||
+        !*(_QWORD*)ctx.pContext ||
+        GetHookManagerBaseAddr(*(__int64*)ctx.pContext) != DynamicImport_ResolveAndCallFunction() ||
+        !CheckNonZero_Offset40Or72(*(__int64*)ctx.pContext))
+    {
+        BOOL result = NtGdiBitBlt_Original(
+            hdcDst, x, y, cx, cy, hdcSrc, xSrc, ySrc, rop4, crBackColor, fl);
+        goto CLEANUP;
+    }
+
+    // Notify usermode implant
+    g_Comm.blt.active = 1;
+    g_Comm.blt.seq++;
+
+    g_Comm.blt.dstX   = x;
+    g_Comm.blt.dstY   = y;
+    g_Comm.blt.width  = cx;
+    g_Comm.blt.height = cy;
+    g_Comm.blt.srcX   = xSrc;
+    g_Comm.blt.srcY   = ySrc;
+
+    g_Comm.blt.ack = 0;
+
+    // Wait for usermode to respond
+    uint64_t start = GetCurrentTimestampMs();
+    while (!g_Comm.blt.ack)
+    {
+        if (GetCurrentTimestampMs() - start > 2000)
+            break;
+
+        _mm_pause();
+    }
+
+    BOOL result = NtGdiBitBlt_Original(
+        hdcDst, x, y, cx, cy, hdcSrc, xSrc, ySrc, rop4, crBackColor, fl);
+
+    g_Comm.blt.active = 0;
+    g_Comm.blt.ack    = 0;
+
+CLEANUP:
+    if (*(_QWORD*)ctx.pWrapper)
+    {
+        volatile LONG* ref = *(volatile LONG**)ctx.pWrapper;
+        if (!_InterlockedExchangeAdd(ref + 2, -1))
+        {
+            BOOL r = result;
+            (*(void(__fastcall**)(volatile LONG*))(*(_QWORD*)ref + 0x10))(ref);
+            NegativeOne_Wrapper(ref);
+            return r;
+        }
+    }
+    return result;
+}
+view raw
+.cpp hosted with ❤ by GitHub
+Hook_PsWatchWorkingSet
+
+This hook intercepts a kernel working set notification and suppresses it if either the instruction pointer (PcValue) or virtual address (Va) falls within the cheat’s memory region.
+
+This prevents those page faults from being reported via working set monitoring APIs (e.g. GetWsChangesEx), which would otherwise reveal the location of the implant.
+void __fastcall hook_PsWatchWorkingSet(__int64 Status, unsigned __int64 PcValue, unsigned __int64 Va)
+{
+  // [COLLAPSED LOCAL DECLARATIONS. PRESS NUMPAD "+" TO EXPAND]
+
+  g_ExecutingEPTHook = 1;
+  OriginalPsWatchWorkingSet = (void (__fastcall *)(__int64, unsigned __int64, unsigned __int64))qword_1402DB8F0;
+  GetTebContext_CheckThreadMatch_ReturnGlobals(&ThreadContext, 1);
+  if ( *(_QWORD *)ThreadContext.pContext
+    && (IsAddressInProtectedRegions(*(__int64 *)ThreadContext.pContext, PcValue)
+     || IsAddressInProtectedRegions(*(__int64 *)ThreadContext.pContext, Va)) )
+  {
+    pTebWrapperRefCount1 = *(volatile signed __int32 **)ThreadContext.pWrapper;
+    if ( *(_QWORD *)ThreadContext.pWrapper )
+    {
+      if ( !_InterlockedExchangeAdd((volatile signed __int32 *)(*(_QWORD *)ThreadContext.pWrapper + 8LL), 0xFFFFFFFF) )
+      {
+        (*(void (__fastcall **)(volatile signed __int32 *))(*(_QWORD *)pTebWrapperRefCount1 + 16LL))(pTebWrapperRefCount1);
+        NegativeOne_Wrapper(pTebWrapperRefCount1);
+      }
+    }
+  }
+  else
+  {
+    pTebWrapperRefCount2 = *(volatile signed __int32 **)ThreadContext.pWrapper;
+    if ( *(_QWORD *)ThreadContext.pWrapper
+      && !_InterlockedExchangeAdd((volatile signed __int32 *)(*(_QWORD *)ThreadContext.pWrapper + 8LL), 0xFFFFFFFF) )
+    {
+      (*(void (__fastcall **)(volatile signed __int32 *))(*(_QWORD *)pTebWrapperRefCount2 + 16LL))(pTebWrapperRefCount2);
+      NegativeOne_Wrapper(pTebWrapperRefCount2);
+    }
+    OriginalPsWatchWorkingSet(Status, PcValue, Va);
+  }
+}
+view raw
+.cpp hosted with ❤ by GitHub
+Possible Detections
+
+The depth of ring-1’s hooking and hijacking across the boot chain, kernel, hypervisor, and EPT layers creates a large number of observable anomalies. Below we outline several detection strategies that exploit weaknesses in their implementation as described throughout this article.
+
+    Shadow PML4E Scan: The implant clones the target process’s PML4 and inserts a malicious entry for the cheat DLL. On guest CR3 writes, their sync routine recopies every PML4E except their own. A detection can exploit this by executing within the game process context under the attacker’s cloned CR3, which is reachable along hooked paths due to their vast amount of game hooks and rendering, then probe the virtual address range controlled by each PML4E. Any PML4E-backed range that does not page fault upon being accessed but has no corresponding VAD or legitimate PML4E entry is a ring-1 allocation. Another technique leverages the accessed bit. Again, getting execution under the shadow CR3, which has COPIES of the PML4Es. So, we can take control of cores so that other code does not interfere, then unset the accessed bit on a PML4E, flush the TLB, access valid memory backed by that entry, and see if the accessed bit was toggled in the actual process page tables.
+    Intel Processor Trace (IPT) Analysis: Windows provides built-in kernel support for Intel Processor Trace. By enabling IPT on the protected game process, the resulting trace data can be inspected for anomalies. IP (Instruction Pointer) packets will contain addresses within the cheat DLL’s virtual address range that have no legitimate mapping in the process’s real page tables. Additionally, PIP (Paging Information Packet) records encoded CR3 values; if a PIP packet yields a CR3 that does not match any known value then it reveals the existence of the attacker’s cloned page table.
+    Physical Memory 0xCE Page Scan: When the implant hides executable pages behind EPT, it fills the guest-visible physical page with 0xCE bytes. A scan of physical memory for pages that are entirely 0xCE-filled and not backed by the memory manager strongly indicates a spoofed EPT shadow page. This specific fill byte is a brittle signature that the attacker could change, and just geared towards ring-1.
+    EFI Runtime Region Execution Analysis: The implant allocates memory during boot. On systems without HVCI, a kernel-mode driver can mark the entire EFI runtime code range as non-executable via page table manipulation, then incrementally re-enable execute permissions. Each page fault on an NX violation identifies an actively executing EFI page. The contents of that page can then be analyzed through single-stepping, emulation, call stack inspection, or instruction pattern matching before allowing execution to proceed. Because their implant is also mapped into the guest, their code should be called quite often in ways that regular EFI code should not be invoked.
+    Hyper-V Memory Exposure: Ring-1’s SLAT implementation identity-maps all guest physical memory without protecting host Hyper-V memory. On a correctly configured VBS/HVCI system, Hyper-V’s pages are SLAT-protected and inaccessible from the guest. This can be tested: locate Hyper-V’s CPUID emulation handler, patch the vendor ID string to any value, invoke CPUID, and check whether the returned string reflects the patch to ensure that it’s the real Hyper-V. On a legitimate system, the scan would never find the real Hyper-V image due to it being protected by SLAT. Refer to btbd/ddma for a similar example.
+    RWX Anomaly Under HVCI: When HVCI is enabled, the hypervisor enforces W^X semantics in the EPT where no page should simultaneously be writable and executable. However, ring-1 rebuilds per-processor EPTPs as identity maps with RWX permissions. Normally, on a HVCI system, this will never be possible from the EPT level.
+
+With ring-1’s vast amount of hooks and instrumentation, there are virtually an unlimited amount of detections possible that detect specifically their implementation, and other detections that detect generic implementations that operate in a similar fashion. These detections are just touching the surface.
+
+The best approach here is to collect this data generically on the client and let the server decide whether what it’s seeing looks like ring-1 or just normal system behavior. The client should be treated as untrusted. All the real classification logic belongs server-side where it can’t be tampered with. These detections were explained briefly and not every safety caveat was covered. Some of them don’t work on HVCI, some may conflict with the kernel, running processes, or devices, and all of them need to be implemented carefully.
+Conclusion
+
+A key takeaway is the deliberate separation of responsibilities across privilege boundaries: guest user-mode is used only as an entry point, guest kernel execution provides convenient access to Windows internals, and VMX-root execution is reserved for a minimal set of highly privileged operations that must be isolated from the guest. This design reflects a mature threat model that prioritizes resilience against inspection and interference over simplicity.
+
+Importantly, this work also highlights the defensive implications of such techniques. While Secure Boot and firmware integrity mechanisms would prevent this attack chain when correctly enforced, the explicit requirement for users to disable Secure Boot demonstrates how social and usability tradeoffs continue to undermine otherwise effective platform defenses. At runtime, the implant further illustrates how existing assumptions around CR3 visibility, EPT consistency, and VMEXIT behavior can be exploited by an attacker operating within a legitimate hypervisor context.
+
+We provide this level of deep reverse engineering, hypervisor analysis, and offensive capability assessment directly to anti-cheat vendors and game studios. Our work focuses on identifying, dissecting, and helping mitigate sophisticated cheat platforms operating at the kernel, firmware, and virtualization layers. Organizations interested in these services are encouraged to reach out.

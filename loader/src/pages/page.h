@@ -15,4 +15,6 @@ public:
 	virtual void on_exit() = 0;
 	virtual void render() = 0;
 	virtual page_id get_id() const = 0;
+
+	float m_enter_time = 0.0f; // set by app::navigate_to
 };

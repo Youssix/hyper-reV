@@ -56,6 +56,16 @@ void slat::hook::entry_t::set_original_execute_access(const std::uint64_t origin
 	original_execute_access_ = original_execute_access;
 }
 
+std::uint64_t slat::hook::entry_t::original_user_mode_execute() const
+{
+	return original_user_mode_execute_;
+}
+
+void slat::hook::entry_t::set_original_user_mode_execute(const std::uint64_t original_user_mode_execute)
+{
+	original_user_mode_execute_ = original_user_mode_execute;
+}
+
 void slat::hook::entry_t::set_paging_split_state(const std::uint64_t paging_split_state)
 {
 	paging_split_state_ = paging_split_state;

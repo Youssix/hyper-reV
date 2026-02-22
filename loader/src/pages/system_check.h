@@ -11,4 +11,5 @@ public:
 
 private:
 	bool m_checks_done = false;
+	bool m_force_skip = false;
 };

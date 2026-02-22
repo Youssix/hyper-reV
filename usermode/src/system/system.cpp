@@ -458,15 +458,17 @@ std::uint8_t resolve_offsets_from_pdb()
 	sys::offsets::eprocess_unique_process_id = resolve("_EPROCESS", L"UniqueProcessId");
 	// DirectoryTableBase is in _KPROCESS (first member of _EPROCESS at offset 0)
 	sys::offsets::eprocess_directory_table_base = resolve("_KPROCESS", L"DirectoryTableBase");
+	sys::offsets::kprocess_user_directory_table_base = resolve("_KPROCESS", L"UserDirectoryTableBase");
 	sys::offsets::eprocess_image_file_name = resolve("_EPROCESS", L"ImageFileName");
 	sys::offsets::eprocess_section_base_address = resolve("_EPROCESS", L"SectionBaseAddress");
 	sys::offsets::eprocess_peb = resolve("_EPROCESS", L"Peb");
 	sys::offsets::peb_kernel_callback_table = resolve("_PEB", L"KernelCallbackTable");
 
-	std::println("[pdb] EPROCESS offsets: APL=0x{:X} PID=0x{:X} DTB=0x{:X} IFN=0x{:X} SBA=0x{:X} PEB=0x{:X}",
+	std::println("[pdb] EPROCESS offsets: APL=0x{:X} PID=0x{:X} DTB=0x{:X} UDTB=0x{:X} IFN=0x{:X} SBA=0x{:X} PEB=0x{:X}",
 		sys::offsets::eprocess_active_process_links,
 		sys::offsets::eprocess_unique_process_id,
 		sys::offsets::eprocess_directory_table_base,
+		sys::offsets::kprocess_user_directory_table_base,
 		sys::offsets::eprocess_image_file_name,
 		sys::offsets::eprocess_section_base_address,
 		sys::offsets::eprocess_peb);
@@ -485,6 +487,21 @@ std::uint8_t resolve_offsets_from_pdb()
 		sys::offsets::kthread_trap_frame,
 		sys::offsets::kthread_state,
 		sys::offsets::kthread_process);
+
+	// KTRAP_FRAME offsets for relay shellcode
+	sys::offsets::ktrap_frame_rip = resolve("_KTRAP_FRAME", L"Rip");
+	sys::offsets::ktrap_frame_rsp = resolve("_KTRAP_FRAME", L"Rsp");
+	sys::offsets::ktrap_frame_rax = resolve("_KTRAP_FRAME", L"Rax");
+	sys::offsets::ktrap_frame_rcx = resolve("_KTRAP_FRAME", L"Rcx");
+	sys::offsets::ktrap_frame_rdx = resolve("_KTRAP_FRAME", L"Rdx");
+	sys::offsets::ktrap_frame_r8  = resolve("_KTRAP_FRAME", L"R8");
+	sys::offsets::ktrap_frame_r9  = resolve("_KTRAP_FRAME", L"R9");
+
+	std::println("[pdb] KTRAP_FRAME offsets: Rax=0x{:X} Rcx=0x{:X} Rdx=0x{:X} R8=0x{:X} R9=0x{:X} Rip=0x{:X} Rsp=0x{:X}",
+		sys::offsets::ktrap_frame_rax, sys::offsets::ktrap_frame_rcx,
+		sys::offsets::ktrap_frame_rdx, sys::offsets::ktrap_frame_r8,
+		sys::offsets::ktrap_frame_r9, sys::offsets::ktrap_frame_rip,
+		sys::offsets::ktrap_frame_rsp);
 
 	// resolve MmAccessFault RVA for EPT hook
 	ULONG mmaf_rva = pdb_get_rva(&pdb_ctx, "MmAccessFault");
@@ -516,6 +533,18 @@ std::uint8_t resolve_offsets_from_pdb()
 			std::println("[pdb] KiSystemCall64 RVA: 0x{:X} (will need signature scan for exit point)", ksc64_rva);
 	}
 
+	// resolve NtClose RVA for syscall hijack EPT hook
+	ULONG ntclose_rva = pdb_get_rva(&pdb_ctx, "NtClose");
+	if (ntclose_rva != 0 && ntclose_rva != static_cast<ULONG>(-1))
+	{
+		sys::offsets::nt_close_rva = static_cast<std::uint64_t>(ntclose_rva);
+		std::println("[pdb] NtClose RVA: 0x{:X}", sys::offsets::nt_close_rva);
+	}
+	else
+	{
+		std::println("[pdb] WARNING: NtClose not found");
+	}
+
 	pdb_unload(pdb_path, &pdb_ctx);
 
 	return 1;
@@ -537,6 +566,15 @@ void apply_fallback_offsets()
 	sys::offsets::kthread_trap_frame = eprocess_offsets_fallback::kthread_trap_frame;
 	sys::offsets::kthread_state = eprocess_offsets_fallback::kthread_state;
 	sys::offsets::kthread_process = eprocess_offsets_fallback::kthread_process;
+
+	// KTRAP_FRAME fallback offsets (verified via PDB on Win11 23H2)
+	sys::offsets::ktrap_frame_rip = 0x168;
+	sys::offsets::ktrap_frame_rsp = 0x180;
+	sys::offsets::ktrap_frame_rax = 0x30;
+	sys::offsets::ktrap_frame_rcx = 0x38;
+	sys::offsets::ktrap_frame_rdx = 0x40;
+	sys::offsets::ktrap_frame_r8  = 0x48;
+	sys::offsets::ktrap_frame_r9  = 0x50;
 }
 
 std::uint8_t sys::set_up()
@@ -706,23 +744,31 @@ std::vector<sys::process_info_t> sys::process::enumerate_processes()
 	{
 		process_info_t process = { };
 
-		process.eprocess = current_eprocess;
+		// Skip terminated/zombie processes:
+		// KPROCESS.Header.SignalState (EPROCESS+0x4) is set to 1 when process exits.
+		// Offset 0x4 is stable across all Windows versions.
+		std::int32_t signal_state = read_kernel_virtual_memory<std::int32_t>(current_eprocess + 0x4);
 
-		// Read PID
-		process.pid = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_unique_process_id);
+		if (signal_state == 0)
+		{
+			process.eprocess = current_eprocess;
 
-		// Read CR3 (DirectoryTableBase)
-		process.cr3 = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_directory_table_base);
+			// Read PID
+			process.pid = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_unique_process_id);
 
-		// Read ImageFileName (15 chars max)
-		char image_file_name[16] = { 0 };
-		hypercall::read_guest_virtual_memory(image_file_name, current_eprocess + sys::offsets::eprocess_image_file_name, current_cr3, 15);
-		process.name = std::string(image_file_name);
+			// Read CR3 (DirectoryTableBase)
+			process.cr3 = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_directory_table_base);
 
-		// Read SectionBaseAddress (image base)
-		process.base_address = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_section_base_address);
+			// Read ImageFileName (15 chars max)
+			char image_file_name[16] = { 0 };
+			hypercall::read_guest_virtual_memory(image_file_name, current_eprocess + sys::offsets::eprocess_image_file_name, current_cr3, 15);
+			process.name = std::string(image_file_name);
 
-		processes.push_back(process);
+			// Read SectionBaseAddress (image base)
+			process.base_address = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_section_base_address);
+
+			processes.push_back(process);
+		}
 
 		// Get next process via ActiveProcessLinks.Flink
 		std::uint64_t flink = read_kernel_virtual_memory<std::uint64_t>(current_eprocess + sys::offsets::eprocess_active_process_links);

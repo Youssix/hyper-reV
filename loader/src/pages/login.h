@@ -1,5 +1,6 @@
 #pragma once
 #include "page.h"
+#include "../security/credential_store.h"
 #include <string>
 #include <future>
 
@@ -12,6 +13,9 @@ public:
 	page_id get_id() const override { return page_id::login; }
 
 private:
+	void try_auto_login();
+	void do_login();
+
 	// tab: 0 = license key, 1 = account
 	int m_tab = 0;
 
@@ -22,4 +26,11 @@ private:
 	std::string m_error;
 	bool m_logging_in = false;
 	std::future<void> m_login_future;
+
+	// credential history
+	credential_store::saved_credentials_t m_saved;
+	bool m_loaded_creds = false;
+	bool m_auto_login_tried = false;
+	bool m_show_key_dropdown = false;
+	int m_key_to_remove = -1; // deferred removal
 };

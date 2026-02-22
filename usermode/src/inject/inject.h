@@ -206,6 +206,8 @@ typedef struct _HIJACK_DATA {
 	uintptr_t DllMainResult; // return value from _DllMainCRTStartup (0=FALSE, 1=TRUE)
 } HIJACK_DATA;
 
+inline std::uint64_t target_pid = 0; // PID of injected process (for watchdog)
+
 inline std::uint64_t ksse_hook_va = 0; // stored for removal
 inline std::uint16_t ksse_shellcode_detour_offset = 0; // detour holder allocation for our shellcode
 
@@ -335,6 +337,196 @@ inline std::vector<uint8_t> build_syscall_exit_hook(
 	// Patch jump offsets
 	sc[jne1_pos] = static_cast<uint8_t>(skip_pos - (jne1_pos + 1));
 	sc[jz_cpuid_pos] = static_cast<uint8_t>(skip_pos - (jz_cpuid_pos + 1));
+
+	return sc;
+}
+
+// Build the NtClose relay shellcode — dual-mode ring-0 shellcode:
+//   Hijack mode: same EPROCESS check + CPUID(7) atomic claim + TrapFrame.Rip overwrite
+//   Relay mode:  magic handle check (TrapFrame.Rcx == 0xDEAD1337) → load command
+//                params from TrapFrame registers → CPUID(20) → early RET with result in RAX
+//                (short-circuits NtClose — no STATUS_INVALID_HANDLE overwrite)
+//
+// This replaces build_syscall_exit_hook for the NtClose hook. After DllMain completes,
+// the NtClose hook stays alive for relay communication between DLL and hypervisor.
+//
+// KTRAP_FRAME offsets are resolved from PDB at startup (sys::offsets::ktrap_frame_*).
+inline std::vector<uint8_t> build_ntclose_relay_shellcode(
+	std::uint64_t target_eprocess,
+	std::uint32_t kthread_process_offset,
+	std::uint32_t kthread_trapframe_offset,
+	std::uint32_t tf_rcx_off,   // KTRAP_FRAME.Rcx offset
+	std::uint32_t tf_rdx_off,   // KTRAP_FRAME.Rdx offset
+	std::uint32_t tf_r8_off,    // KTRAP_FRAME.R8  offset
+	std::uint32_t tf_r9_off,    // KTRAP_FRAME.R9  offset
+	std::uint32_t tf_rip_off)   // KTRAP_FRAME.Rip offset
+{
+	std::vector<uint8_t> sc;
+	sc.reserve(180);
+
+	auto push_u8 = [&](uint8_t b) { sc.push_back(b); };
+	auto push_u32 = [&](uint32_t v) {
+		for (int i = 0; i < 4; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+	auto push_u64 = [&](uint64_t v) {
+		for (int i = 0; i < 8; i++) sc.push_back(static_cast<uint8_t>(v >> (i * 8)));
+	};
+
+	// Build CPUID leaf values for both modes
+	hypercall_info_t hijack_call = {};
+	hijack_call.primary_key = hypercall_primary_key;
+	hijack_call.secondary_key = hypercall_secondary_key;
+	hijack_call.call_type = hypercall_type_t::read_guest_cr3;
+	hijack_call.call_reserved_data = 7; // check_and_clear_syscall_hijack
+	std::uint32_t cpuid7_value = static_cast<std::uint32_t>(hijack_call.value);
+
+	hypercall_info_t relay_call = {};
+	relay_call.primary_key = hypercall_primary_key;
+	relay_call.secondary_key = hypercall_secondary_key;
+	relay_call.call_type = hypercall_type_t::read_guest_cr3;
+	relay_call.call_reserved_data = 20; // process_command
+	std::uint32_t cpuid20_value = static_cast<std::uint32_t>(relay_call.value);
+
+	// === Save registers ===
+	push_u8(0x50); // push rax
+	push_u8(0x51); // push rcx
+	push_u8(0x52); // push rdx
+	push_u8(0x53); // push rbx
+
+	// === Stage 1: EPROCESS check ===
+	// mov rax, gs:[0x188]  — KPCR.CurrentThread
+	push_u8(0x65); push_u8(0x48); push_u8(0x8B); push_u8(0x04); push_u8(0x25);
+	push_u8(0x88); push_u8(0x01); push_u8(0x00); push_u8(0x00);
+
+	// mov rcx, [rax + kthread_process_offset]
+	push_u8(0x48); push_u8(0x8B); push_u8(0x88);
+	push_u32(kthread_process_offset);
+
+	// movabs rdx, <target_eprocess>
+	push_u8(0x48); push_u8(0xBA);
+	push_u64(target_eprocess);
+
+	// cmp rcx, rdx
+	push_u8(0x48); push_u8(0x3B); push_u8(0xCA);
+
+	// jne .skip
+	push_u8(0x75);
+	const std::size_t jne_eprocess_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// === Stage 2: Read TrapFrame ptr ===
+	// mov rcx, [rax + kthread_trapframe_offset]
+	push_u8(0x48); push_u8(0x8B); push_u8(0x88);
+	push_u32(kthread_trapframe_offset);
+
+	// === Stage 3: Check magic handle (TrapFrame.Rcx low32) ===
+	// mov edx, [rcx + tf_rcx_off]   — TrapFrame.Rcx (NtClose first arg = handle)
+	push_u8(0x8B); push_u8(0x91);
+	push_u32(tf_rcx_off);
+
+	// cmp edx, 0xDEAD1337
+	push_u8(0x81); push_u8(0xFA);
+	push_u32(0xDEAD1337);
+
+	// je .relay_mode
+	push_u8(0x74);
+	const std::size_t je_relay_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// ============================================================
+	// HIJACK MODE — same as build_syscall_exit_hook CPUID(7) flow
+	// ============================================================
+
+	// mov rdx, [rcx + tf_rip_off]  — TrapFrame.Rip → RDX (passed to CPUID handler)
+	push_u8(0x48); push_u8(0x8B); push_u8(0x91);
+	push_u32(tf_rip_off);
+
+	// mov ecx, <cpuid7_value>
+	push_u8(0xB9);
+	push_u32(cpuid7_value);
+
+	// cpuid
+	push_u8(0x0F); push_u8(0xA2);
+
+	// test rax, rax  (0 = not armed, skip)
+	push_u8(0x48); push_u8(0x85); push_u8(0xC0);
+
+	// jz .skip
+	push_u8(0x74);
+	const std::size_t jz_cpuid7_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// Claimed! RAX = shellcode_va. Re-read TrapFrame.
+	// mov rcx, gs:[0x188]
+	push_u8(0x65); push_u8(0x48); push_u8(0x8B); push_u8(0x0C); push_u8(0x25);
+	push_u8(0x88); push_u8(0x01); push_u8(0x00); push_u8(0x00);
+
+	// mov rcx, [rcx + kthread_trapframe_offset]
+	push_u8(0x48); push_u8(0x8B); push_u8(0x89);
+	push_u32(kthread_trapframe_offset);
+
+	// mov [rcx + tf_rip_off], rax  — overwrite TrapFrame.Rip
+	push_u8(0x48); push_u8(0x89); push_u8(0x81);
+	push_u32(tf_rip_off);
+
+	// jmp .skip
+	push_u8(0xEB);
+	const std::size_t jmp_skip_pos = sc.size();
+	push_u8(0x00); // placeholder
+
+	// ============================================================
+	// RELAY MODE — load command params from TrapFrame, CPUID(20),
+	//              then early RET to short-circuit NtClose.
+	//              Result stays in RAX → system service dispatcher
+	//              returns it to usermode.
+	// ============================================================
+	const std::size_t relay_mode_pos = sc.size();
+
+	// rcx = TrapFrame ptr (still valid from stage 2)
+
+	// mov rdx, [rcx + tf_rdx_off]   — TrapFrame.Rdx = command ID
+	push_u8(0x48); push_u8(0x8B); push_u8(0x91);
+	push_u32(tf_rdx_off);
+
+	// mov r8, [rcx + tf_r8_off]    — TrapFrame.R8 = arg1
+	push_u8(0x4C); push_u8(0x8B); push_u8(0x81);
+	push_u32(tf_r8_off);
+
+	// mov r9, [rcx + tf_r9_off]    — TrapFrame.R9 = arg2
+	push_u8(0x4C); push_u8(0x8B); push_u8(0x89);
+	push_u32(tf_r9_off);
+
+	// mov ecx, <cpuid20_value>
+	push_u8(0xB9);
+	push_u32(cpuid20_value);
+
+	// cpuid — VMEXIT → hypervisor dispatches process_command
+	push_u8(0x0F); push_u8(0xA2);
+
+	// RAX = command result from hypervisor.
+	// Short-circuit NtClose: pop saved regs, skip saved rax, ret.
+	// NtClose never executes → no STATUS_INVALID_HANDLE overwrite.
+	// The system service dispatcher sees our RAX as NtClose's return value.
+	push_u8(0x5B);                                     // pop rbx (restore)
+	push_u8(0x5A);                                     // pop rdx (restore)
+	push_u8(0x59);                                     // pop rcx (restore)
+	push_u8(0x48); push_u8(0x83); push_u8(0xC4); push_u8(0x08); // add rsp, 8 (skip saved rax, keep result)
+	push_u8(0xC3);                                     // ret → return to service dispatcher
+
+	// .skip: (hijack mode + non-target fallthrough)
+	const std::size_t skip_pos = sc.size();
+
+	// pop rbx, rdx, rcx, rax
+	push_u8(0x5B);
+	push_u8(0x5A);
+	push_u8(0x59);
+	push_u8(0x58);
+
+	// Patch jump offsets
+	sc[jne_eprocess_pos] = static_cast<uint8_t>(skip_pos - (jne_eprocess_pos + 1));
+	sc[je_relay_pos] = static_cast<uint8_t>(relay_mode_pos - (je_relay_pos + 1));
+	sc[jz_cpuid7_pos] = static_cast<uint8_t>(skip_pos - (jz_cpuid7_pos + 1));
+	sc[jmp_skip_pos] = static_cast<uint8_t>(skip_pos - (jmp_skip_pos + 1));
 
 	return sc;
 }
@@ -531,6 +723,23 @@ inline bool install_syscall_exit_hook(std::uint64_t target_eprocess)
 	{
 		ksse_hook_va = ksse_va;
 		std::println("[+] KiSystemServiceExit EPT hook installed at 0x{:X}", ksse_va);
+
+		// Verify shadow page content at offset 0x710
+		auto it = hook::kernel_hook_list.find(ksse_va);
+		if (it != hook::kernel_hook_list.end())
+		{
+			std::uint8_t* shadow = static_cast<std::uint8_t*>(it->second.get_mapped_shadow_page());
+			std::uint64_t off = ksse_va & 0xFFF;
+			std::println("[+] Shadow page verify @ offset 0x{:X}: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+				off,
+				shadow[off+0], shadow[off+1], shadow[off+2], shadow[off+3],
+				shadow[off+4], shadow[off+5], shadow[off+6], shadow[off+7],
+				shadow[off+8], shadow[off+9], shadow[off+10], shadow[off+11],
+				shadow[off+12], shadow[off+13]);
+			std::println("[+] (should be: 68 xx xx xx xx C7 44 24 04 xx xx xx xx C3 = abs jmp to detour holder shellcode)");
+			std::println("[+] Shadow page owner={}, patched_bytes={}", (unsigned)it->second.is_shadow_page_owner, (unsigned)it->second.patched_byte_count);
+		}
+
 		return true;
 	}
 
@@ -563,6 +772,167 @@ inline bool remove_syscall_exit_hook()
 	}
 
 	std::println("[-] Failed to remove KiSystemServiceExit EPT hook");
+	return false;
+}
+
+//=============================================================================
+// NtClose EPT Hook — alternative hijack trigger for processes that don't
+// go through KiSystemServiceExit (fast-path sysret bypasses the slow path).
+// NtClose is universally called by most processes including anti-cheats.
+// Reuses the same EPROCESS check + CPUID(7) atomic claim shellcode.
+//=============================================================================
+
+inline std::uint64_t ntclose_hook_va = 0;
+inline std::uint16_t ntclose_shellcode_detour_offset = 0;
+
+inline bool install_ntclose_hook(std::uint64_t target_eprocess)
+{
+	if (sys::offsets::nt_close_rva == 0)
+	{
+		std::println("[-] NtClose RVA not resolved");
+		return false;
+	}
+
+	if (!sys::kernel::modules_list.contains("ntoskrnl.exe"))
+	{
+		std::println("[-] ntoskrnl.exe not in modules list");
+		return false;
+	}
+
+	std::uint64_t ntoskrnl_base = sys::kernel::modules_list["ntoskrnl.exe"].base_address;
+	std::uint64_t ntclose_va = ntoskrnl_base + sys::offsets::nt_close_rva;
+
+	std::println("[+] NtClose VA: 0x{:X}", ntclose_va);
+
+	// Build dual-mode relay shellcode: hijack (CPUID 7) + relay (CPUID 20, magic handle)
+	auto full_shellcode = build_ntclose_relay_shellcode(
+		target_eprocess,
+		static_cast<std::uint32_t>(sys::offsets::kthread_process),
+		static_cast<std::uint32_t>(sys::offsets::kthread_trap_frame),
+		static_cast<std::uint32_t>(sys::offsets::ktrap_frame_rcx),
+		static_cast<std::uint32_t>(sys::offsets::ktrap_frame_rdx),
+		static_cast<std::uint32_t>(sys::offsets::ktrap_frame_r8),
+		static_cast<std::uint32_t>(sys::offsets::ktrap_frame_r9),
+		static_cast<std::uint32_t>(sys::offsets::ktrap_frame_rip));
+
+	// Append 14-byte jmp back to ntclose_va + 14 (past the trampoline, hits jmp_to_detour)
+	auto return_jmp = build_abs_jmp(ntclose_va + 14);
+	full_shellcode.insert(full_shellcode.end(), return_jmp.begin(), return_jmp.end());
+
+	std::println("[+] NtClose relay shellcode: {} bytes (with return jmp)", full_shellcode.size());
+
+	// Allocate space in detour holder
+	void* sc_buffer = kernel_detour_holder::allocate_memory(
+		static_cast<std::uint16_t>(full_shellcode.size()));
+
+	if (sc_buffer == nullptr)
+	{
+		std::println("[-] Failed to allocate detour holder space for NtClose shellcode");
+		return false;
+	}
+
+	ntclose_shellcode_detour_offset = kernel_detour_holder::get_allocation_offset(sc_buffer);
+	memcpy(sc_buffer, full_shellcode.data(), full_shellcode.size());
+
+	std::uint64_t sc_kernel_va = hook::kernel_detour_holder_base + ntclose_shellcode_detour_offset;
+
+	std::println("[+] NtClose shellcode in detour holder at offset 0x{:X} (kernel VA: 0x{:X})",
+		ntclose_shellcode_detour_offset, sc_kernel_va);
+
+	// Build trampoline: 14-byte jmp to our shellcode
+	auto trampoline = build_abs_jmp(sc_kernel_va);
+
+	// Install EPT hook
+	std::vector<std::uint8_t> post_original_bytes;
+
+	std::uint8_t status = hook::add_kernel_hook(ntclose_va, trampoline, post_original_bytes);
+
+	if (status == 1)
+	{
+		ntclose_hook_va = ntclose_va;
+		std::println("[+] NtClose EPT hook installed at 0x{:X}", ntclose_va);
+
+		// Verify shadow page content at NtClose offset
+		auto it = hook::kernel_hook_list.find(ntclose_va);
+		if (it != hook::kernel_hook_list.end())
+		{
+			std::uint8_t* shadow = static_cast<std::uint8_t*>(it->second.get_mapped_shadow_page());
+			std::uint64_t off = ntclose_va & 0xFFF;
+			std::println("[+] NtClose shadow page verify @ offset 0x{:X}: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+				off,
+				shadow[off+0], shadow[off+1], shadow[off+2], shadow[off+3],
+				shadow[off+4], shadow[off+5], shadow[off+6], shadow[off+7],
+				shadow[off+8], shadow[off+9], shadow[off+10], shadow[off+11],
+				shadow[off+12], shadow[off+13]);
+			std::println("[+] NtClose (should be: 68 xx xx xx xx C7 44 24 04 xx xx xx xx C3 = abs jmp to shellcode)");
+			std::println("[+] NtClose shadow owner={}, patched_bytes={}, pfn=0x{:X}",
+				(unsigned)it->second.is_shadow_page_owner, (unsigned)it->second.patched_byte_count,
+				(unsigned long long)it->second.original_page_pfn);
+
+			// Also verify what the ORIGINAL NtClose bytes look like (read from kernel via hypercall)
+			std::uint8_t orig_bytes[14] = {};
+			hypercall::read_guest_virtual_memory(orig_bytes, ntclose_va, sys::current_cr3, 14);
+			std::println("[+] NtClose original via read_gvm: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+				orig_bytes[0], orig_bytes[1], orig_bytes[2], orig_bytes[3],
+				orig_bytes[4], orig_bytes[5], orig_bytes[6], orig_bytes[7],
+				orig_bytes[8], orig_bytes[9], orig_bytes[10], orig_bytes[11],
+				orig_bytes[12], orig_bytes[13]);
+			std::println("[+] (read_gvm goes through EPT read path → should see ORIGINAL bytes if hook works, or shadow if read=1)");
+
+			// Verify EPT PTE permissions directly from hypervisor
+			std::uint64_t ntclose_gpa = hypercall::translate_guest_virtual_address(ntclose_va, sys::current_cr3);
+			std::uint64_t hyperv_pte = hypercall::read_ept_pte(ntclose_gpa, 0); // hyperv_cr3
+			std::uint64_t hook_pte = hypercall::read_ept_pte(ntclose_gpa, 1);   // hook_cr3
+
+			auto decode_pte = [](std::uint64_t pte, const char* name) {
+				if (pte & (1ull << 3)) // found flag
+				{
+					bool r = pte & 1, w = (pte >> 1) & 1, x = (pte >> 2) & 1;
+					std::uint64_t pfn = pte >> 12;
+					std::println("[+] EPT {} PTE: R={} W={} X={} PFN=0x{:X}",
+						name, r ? 1 : 0, w ? 1 : 0, x ? 1 : 0, pfn);
+				}
+				else
+				{
+					std::println("[!] EPT {} PTE: NOT FOUND (raw=0x{:X})", name, pte);
+				}
+			};
+
+			decode_pte(hyperv_pte, "hyperv_cr3");
+			decode_pte(hook_pte, "hook_cr3");
+			std::println("[+] Expected: hyperv_cr3 R=0 W=0 X=1 (shadow PFN), hook_cr3 R=1 W=1 X=0 (original PFN)");
+		}
+
+		return true;
+	}
+
+	kernel_detour_holder::free_memory(sc_buffer);
+	ntclose_shellcode_detour_offset = 0;
+	std::println("[-] Failed to install NtClose EPT hook");
+	return false;
+}
+
+inline bool remove_ntclose_hook()
+{
+	if (ntclose_hook_va == 0) return false;
+
+	std::uint8_t status = hook::remove_kernel_hook(ntclose_hook_va, 1);
+	if (status == 1)
+	{
+		std::println("[+] NtClose EPT hook removed");
+		ntclose_hook_va = 0;
+
+		if (ntclose_shellcode_detour_offset != 0)
+		{
+			void* sc_alloc = kernel_detour_holder::get_allocation_from_offset(ntclose_shellcode_detour_offset);
+			kernel_detour_holder::free_memory(sc_alloc);
+			ntclose_shellcode_detour_offset = 0;
+		}
+
+		return true;
+	}
+
+	std::println("[-] Failed to remove NtClose EPT hook");
 	return false;
 }
 
@@ -626,16 +996,37 @@ inline bool hijack_thread(std::uint64_t clone_cr3, std::uint64_t target_cr3,
 	std::println("[+] Shellcode verify: {:02X} {:02X} {:02X} {:02X} (expected 9C 50 51 52)",
 		verify[0], verify[1], verify[2], verify[3]);
 
-	// 6. Install EPT hook on KiSystemServiceExit (no hidden memory params needed)
+	// 6. Install EPT hooks for syscall hijack
+	// KiSystemServiceExit (slow path — APCs, callbacks) + NtClose (fast path — universally called)
+	// Both hooks use the same EPROCESS check + CPUID(7) atomic claim, so only one fires.
 	if (!install_syscall_exit_hook(target_eprocess))
 	{
-		std::println("[-] Failed to install syscall exit EPT hook");
+		std::println("[!] WARNING: KiSystemServiceExit EPT hook failed (slow path unavailable)");
+	}
+
+	if (!install_ntclose_hook(target_eprocess))
+	{
+		std::println("[!] WARNING: NtClose EPT hook failed (fast path unavailable)");
+	}
+
+	if (ksse_hook_va == 0 && ntclose_hook_va == 0)
+	{
+		std::println("[-] Both syscall hooks failed — cannot hijack");
 		return false;
 	}
 
 	// 7. Arm the hijack (hypervisor writes original_rip to stub at rip_placeholder_offset)
 	hypercall::arm_syscall_hijack(shellcode_va, rip_placeholder_offset);
 	std::println("[+] Syscall hijack armed with shellcode VA 0x{:X}, rip_offset=0x{:X}", shellcode_va, rip_placeholder_offset);
+
+	// 7b. Set up EPT violation diagnostic watch on NtClose physical page
+	if (ntclose_hook_va != 0)
+	{
+		std::uint64_t ntclose_phys = hypercall::translate_guest_virtual_address(ntclose_hook_va, sys::current_cr3);
+		std::uint64_t ntclose_pfn = ntclose_phys >> 12;
+		hypercall::set_diag_watch_pfn(ntclose_pfn);
+		std::println("[+] Diagnostic: watching NtClose PFN 0x{:X} (phys 0x{:X}) for EPT violations", ntclose_pfn, ntclose_phys);
+	}
 
 	// 8. Print stats
 	std::println("[+] CR3 stats: exits={} swaps={} mmaf_hits={} ept_violations={}",
@@ -647,7 +1038,7 @@ inline bool hijack_thread(std::uint64_t clone_cr3, std::uint64_t target_cr3,
 	// 9. Poll for completion
 	HIJACK_DATA remote_status = {};
 	bool saw_status_1 = false;
-	for (int attempt = 0; attempt < 100; attempt++)
+	for (int attempt = 0; attempt < 600; attempt++)
 	{
 		Sleep(100);
 		hypercall::read_guest_virtual_memory(&remote_status, data_va, clone_cr3, sizeof(remote_status));
@@ -667,18 +1058,26 @@ inline bool hijack_thread(std::uint64_t clone_cr3, std::uint64_t target_cr3,
 			break;
 		}
 
-		if (attempt % 10 == 9)
+		if (attempt % 2 == 1)
 		{
-			std::println("[*] Still waiting... Status={}, mmaf_hits={}, swaps={}, exits={}, ept_violations={}",
-				remote_status.Status, hypercall::read_mmaf_hit_count(),
-				hypercall::read_cr3_swap_count(), hypercall::read_cr3_exit_count(),
-				hypercall::read_slat_violation_count());
+			std::println("[*] Still waiting... Status={}, swaps={}, cpuid7={}, claimed={}, armed={}, ept_viol={}, ntclose_exec={}, ntclose_rw={}",
+				remote_status.Status,
+				hypercall::read_cr3_swap_count(),
+				hypercall::read_hijack_cpuid_count(),
+				hypercall::read_hijack_claimed_count(),
+				hypercall::read_hijack_armed_state(),
+				hypercall::read_slat_violation_count(),
+				hypercall::read_diag_watch_exec_count(),
+				hypercall::read_diag_watch_rw_count());
 		}
 	}
 
-	// 10. Cleanup: remove syscall exit hook, disarm
+	// 10. Cleanup: remove KiSystemServiceExit hook, disarm hijack, stop watching
+	// Keep NtClose hook alive for relay communication (DLL ↔ hypervisor via magic handle)
 	remove_syscall_exit_hook();
+	// remove_ntclose_hook();  — kept alive for relay mode
 	hypercall::disarm_syscall_hijack();
+	hypercall::set_diag_watch_pfn(0);
 
 	if (remote_status.Status != 2)
 	{
@@ -688,9 +1087,14 @@ inline bool hijack_thread(std::uint64_t clone_cr3, std::uint64_t target_cr3,
 		else
 			std::println("[!] Status stayed 0 — EPT hook may not have fired");
 
-		std::println("[+] Final CR3 stats: exits={} swaps={} mmaf_hits={} ept_violations={}",
-			hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(),
-			hypercall::read_mmaf_hit_count(), hypercall::read_slat_violation_count());
+		std::println("[+] Final: swaps={} cpuid7={} claimed={} armed={} ept_viol={} ntclose_exec={} ntclose_rw={}",
+			hypercall::read_cr3_swap_count(),
+			hypercall::read_hijack_cpuid_count(),
+			hypercall::read_hijack_claimed_count(),
+			hypercall::read_hijack_armed_state(),
+			hypercall::read_slat_violation_count(),
+			hypercall::read_diag_watch_exec_count(),
+			hypercall::read_diag_watch_rw_count());
 	}
 
 	return remote_status.Status == 2;
@@ -1007,7 +1411,7 @@ inline std::vector<uint8_t> build_ki_syscall64_service_exit_hook(
 	// .skip:
 	const std::size_t skip_pos = sc.size();
 
-	// Patch both jne offsets
+	// Patch jne offsets
 	sc[jne_eprocess_pos] = static_cast<uint8_t>(skip_pos - (jne_eprocess_pos + 1));
 	sc[jne_pml4_pos] = static_cast<uint8_t>(skip_pos - (jne_pml4_pos + 1));
 
@@ -1349,24 +1753,30 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	// 6b. Register UserDirectoryTableBase for CR3 write interception (KPTI fix)
 	// KPTI: kernel exit writes UserDTB to CR3. Without intercepting this,
 	// the CR3 swap to clone is undone. Now the hypervisor intercepts both PFNs.
-	constexpr std::uint64_t kprocess_user_dtb_offset = 0x280; // KPROCESS.UserDirectoryTableBase
 	std::uint64_t user_dtb = 0;
-	hypercall::read_guest_virtual_memory(&user_dtb,
-		process->eprocess + kprocess_user_dtb_offset,
-		sys::current_cr3, 8);
-
-	if (user_dtb != 0)
+	if (sys::offsets::kprocess_user_directory_table_base != 0)
 	{
-		std::println("[+] UserDirectoryTableBase: 0x{:X}", user_dtb);
-		std::uint64_t result = hypercall::set_user_cr3(user_dtb);
-		if (result)
-			std::println("[+] Registered UserDTB PFN for CR3 interception");
+		hypercall::read_guest_virtual_memory(&user_dtb,
+			process->eprocess + sys::offsets::kprocess_user_directory_table_base,
+			sys::current_cr3, 8);
+
+		if (user_dtb != 0)
+		{
+			std::println("[+] UserDirectoryTableBase: 0x{:X} (offset 0x{:X})", user_dtb, sys::offsets::kprocess_user_directory_table_base);
+			std::uint64_t result = hypercall::set_user_cr3(user_dtb);
+			if (result)
+				std::println("[+] Registered UserDTB PFN for CR3 interception");
+			else
+				std::println("[!] WARNING: Failed to register UserDTB");
+		}
 		else
-			std::println("[!] WARNING: Failed to register UserDTB");
+		{
+			std::println("[!] WARNING: UserDirectoryTableBase is 0 (KPTI disabled?)");
+		}
 	}
 	else
 	{
-		std::println("[!] WARNING: UserDirectoryTableBase is 0 (KPTI disabled or wrong offset)");
+		std::println("[!] WARNING: UserDirectoryTableBase offset not resolved from PDB — KPTI interception disabled");
 	}
 
 	// 7. Relocate image
@@ -1512,6 +1922,7 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	if (dllmain_result)
 	{
 		std::println("[+] Injection complete - DLL running in hidden memory at 0x{:X}", hidden_base_va);
+		std::println("[+] NtClose relay active (magic handle: 0xDEAD1337)");
 	}
 	else
 	{
@@ -1527,6 +1938,11 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	if (!dllmain_result)
 	{
 		// DllMain failed — tear down everything
+		if (ntclose_hook_va != 0)
+		{
+			remove_ntclose_hook();
+			std::println("[*] NtClose hook removed");
+		}
 		if (ki_sc64se_hook_va != 0)
 		{
 			remove_ki_syscall64_service_exit_hook();
@@ -1544,6 +1960,7 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	}
 	else
 	{
+		target_pid = process->pid;
 		std::println("[+] DLL persistent — CR3 intercept + MmAccessFault + callback bypass hooks remain active");
 	}
 
@@ -1566,6 +1983,13 @@ inline void uninject()
 	{
 		remove_syscall_exit_hook();
 		std::println("[+] KiSystemServiceExit hook removed");
+	}
+
+	// 2b. Remove NtClose hook (if still active)
+	if (ntclose_hook_va != 0)
+	{
+		remove_ntclose_hook();
+		std::println("[+] NtClose hook removed");
 	}
 
 	// 3. Remove InstrumentationCallback bypass hook
@@ -1594,11 +2018,14 @@ inline void uninject()
 	hypercall::clear_user_cr3();
 	std::println("[+] UserDTB interception cleared");
 
-	// 6. Disable CR3 intercept (also resets enforce_active)
+	// 6. Disable CR3 intercept (frees clone pages + resets state)
 	hypercall::disable_cr3_intercept();
 	std::println("[+] CR3 intercept disabled");
 
-	// 7. Print final stats
+	// 7. Clear target PID
+	target_pid = 0;
+
+	// 8. Print final stats
 	std::println("[+] Final stats: exits={} swaps={} mmaf_hits={} ept_violations={}",
 		hypercall::read_cr3_exit_count(), hypercall::read_cr3_swap_count(),
 		hypercall::read_mmaf_hit_count(), hypercall::read_slat_violation_count());

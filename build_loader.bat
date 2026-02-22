@@ -1,3 +1,4 @@
 @echo off
-set MSBUILD="C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
-%MSBUILD% "D:\Games\HyperREV\hyper-reV\hyper-reV.sln" /p:Configuration=Release /p:Platform=x64 /t:loader /m /nologo /verbosity:minimal
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=amd64 >nul 2>&1
+cd /d D:\Games\HyperREV\hyper-reV
+msbuild hyper-reV.sln /t:loader /p:Configuration=Release /p:Platform=x64 /v:minimal

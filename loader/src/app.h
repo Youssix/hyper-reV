@@ -27,5 +27,6 @@ namespace app
 	void render();
 
 	void navigate_to(page_id page);
+	void logout();
 	app_state_t& state();
 }

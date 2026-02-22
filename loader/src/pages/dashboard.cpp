@@ -3,6 +3,7 @@
 #include "../auth/auth_client.h"
 #include "../backend/loader_backend.h"
 #include "../renderer/renderer.h"
+#include "../renderer/anim.h"
 
 #include <imgui.h>
 #include <shellapi.h>
@@ -61,7 +62,7 @@ static ImVec4 game_logo_color(const std::string& name)
 	return palette[hash % 6];
 }
 
-static void draw_game_logo(ImVec2 pos, float size, const std::string& name, bool dimmed)
+static void draw_game_logo(ImVec2 pos, float size, const std::string& name, bool dimmed, float alpha = 1.0f)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	ImVec2 wp = ImGui::GetWindowPos();
@@ -70,10 +71,11 @@ static void draw_game_logo(ImVec2 pos, float size, const std::string& name, bool
 
 	ImVec4 col = game_logo_color(name);
 	if (dimmed) { col.x *= 0.35f; col.y *= 0.35f; col.z *= 0.35f; }
+	col.w = alpha;
 
 	// subtle shadow behind logo
 	dl->AddRectFilled(ImVec2(p_min.x + 1, p_min.y + 1), ImVec2(p_max.x + 1, p_max.y + 1),
-		IM_COL32(0, 0, 0, 50), 6.0f);
+		IM_COL32(0, 0, 0, (int)(50 * alpha)), 6.0f);
 	dl->AddRectFilled(p_min, p_max, ImGui::ColorConvertFloat4ToU32(col), 6.0f);
 
 	// first letter centered
@@ -81,12 +83,16 @@ static void draw_game_logo(ImVec2 pos, float size, const std::string& name, bool
 	ImFont* font = renderer::font_title();
 	ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, letter);
 	ImVec2 tp(p_min.x + (size - ts.x) * 0.5f, p_min.y + (size - ts.y) * 0.5f);
-	dl->AddText(font, font->FontSize, tp, IM_COL32(255, 255, 255, dimmed ? 100 : 240), letter);
+	int text_a = dimmed ? (int)(100 * alpha) : (int)(240 * alpha);
+	dl->AddText(font, font->FontSize, tp, IM_COL32(255, 255, 255, text_a), letter);
 }
 
-static void draw_game_entry(int index, const game_info_t& game, bool dimmed)
+static void draw_game_entry(int index, const game_info_t& game, bool dimmed, float enter_time, int stagger_index)
 {
 	auto& state = app::state();
+
+	float item_alpha = anim::stagger(enter_time + 0.3f, stagger_index, 0.1f, 0.4f);
+	float item_slide = anim::slide_stagger(enter_time + 0.3f, stagger_index, 12.0f, 0.1f, 0.4f);
 
 	ImVec4 dot_color;
 	const char* status_text;
@@ -101,8 +107,11 @@ static void draw_game_entry(int index, const game_info_t& game, bool dimmed)
 	if (dimmed) dot_color = ImVec4(dot_color.x * 0.45f, dot_color.y * 0.45f, dot_color.z * 0.45f, 1.0f);
 
 	ImGui::PushID(index);
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, item_alpha);
 
-	float cursor_y = ImGui::GetCursorPosY();
+	float cursor_y = ImGui::GetCursorPosY() + item_slide;
+	ImGui::SetCursorPosY(cursor_y);
+
 	bool selected = (state.selected_game == index);
 	constexpr float LOGO_SIZE = 36.0f;
 	constexpr float ROW_H = 52.0f;
@@ -113,7 +122,7 @@ static void draw_game_entry(int index, const game_info_t& game, bool dimmed)
 		ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 0.42f, 0.0f, 0.12f));
 
 	bool can_select = !dimmed;
-	if (dimmed) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.55f);
+	if (dimmed) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.55f * item_alpha);
 
 	if (ImGui::Selectable("##sel", selected, can_select ? 0 : ImGuiSelectableFlags_Disabled,
 		ImVec2(LEFT_PANEL_WIDTH - 20, ROW_H)))
@@ -130,11 +139,11 @@ static void draw_game_entry(int index, const game_info_t& game, bool dimmed)
 		dl->AddRectFilled(
 			ImVec2(wp.x + 2, wp.y + cursor_y),
 			ImVec2(wp.x + 5, wp.y + cursor_y + ROW_H),
-			U32_ACCENT, 2.0f);
+			IM_COL32(255, 107, 0, (int)(255 * item_alpha)), 2.0f);
 	}
 
 	// logo
-	draw_game_logo(ImVec2(14, cursor_y + (ROW_H - LOGO_SIZE) * 0.5f), LOGO_SIZE, game.name, dimmed);
+	draw_game_logo(ImVec2(14, cursor_y + (ROW_H - LOGO_SIZE) * 0.5f), LOGO_SIZE, game.name, dimmed, item_alpha);
 
 	// text
 	float text_x = 14 + LOGO_SIZE + 10;
@@ -147,13 +156,23 @@ static void draw_game_entry(int index, const game_info_t& game, bool dimmed)
 		ImGui::TextColored(COL_TEXT, "%s", game.name.c_str());
 	ImGui::PopFont();
 
-	// status dot + text
+	// status dot with pulse for online games
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		ImVec2 wp = ImGui::GetWindowPos();
 		float dot_y = cursor_y + 32;
 		ImU32 dc = ImGui::ColorConvertFloat4ToU32(dot_color);
-		dl->AddCircleFilled(ImVec2(wp.x + text_x + 4, wp.y + dot_y + 5), 3.5f, dc);
+		float dot_r = 3.5f;
+
+		// subtle pulse on online status
+		if (game.status == game_status::online && !dimmed)
+		{
+			float pulse_a = anim::pulse_range(0.15f, 0.4f, 2.0f);
+			ImU32 glow = IM_COL32(76, 242, 115, (int)(255 * pulse_a * item_alpha));
+			dl->AddCircleFilled(ImVec2(wp.x + text_x + 4, wp.y + dot_y + 5), dot_r + 3, glow);
+		}
+
+		dl->AddCircleFilled(ImVec2(wp.x + text_x + 4, wp.y + dot_y + 5), dot_r, dc);
 	}
 
 	ImGui::SetCursorPos(ImVec2(text_x + 14, cursor_y + 28));
@@ -163,6 +182,7 @@ static void draw_game_entry(int index, const game_info_t& game, bool dimmed)
 
 	ImGui::SetCursorPosY(cursor_y + ROW_H + 2);
 
+	ImGui::PopStyleVar(); // item alpha
 	ImGui::PopID();
 }
 
@@ -181,9 +201,11 @@ void DashboardPage::render()
 {
 	const float W = (float)renderer::WINDOW_WIDTH;
 	const float H = (float)renderer::WINDOW_HEIGHT;
+	float page_alpha = anim::fade_in(m_enter_time, 0.3f);
 
 	ImGui::SetNextWindowPos(ImVec2(0, 0));
 	ImGui::SetNextWindowSize(ImVec2(W, H));
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, page_alpha);
 	ImGui::Begin("##dashboard", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
 		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
@@ -202,14 +224,15 @@ void DashboardPage::render()
 	ImGui::EndChild();
 	ImGui::PopStyleColor();
 
-	// vertical separator between panels
+	// vertical separator between panels with fade
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		ImVec2 wp = ImGui::GetWindowPos();
+		float sep_alpha = anim::fade_in(m_enter_time + 0.4f, 0.3f);
 		dl->AddLine(
 			ImVec2(wp.x + LEFT_PANEL_WIDTH, wp.y + content_y),
 			ImVec2(wp.x + LEFT_PANEL_WIDTH, wp.y + content_y + content_h),
-			IM_COL32(255, 107, 0, 40), 1.0f);
+			IM_COL32(255, 107, 0, (int)(40 * sep_alpha)), 1.0f);
 	}
 
 	// right panel
@@ -225,6 +248,7 @@ void DashboardPage::render()
 	renderer::draw_window_border();
 
 	ImGui::End();
+	ImGui::PopStyleVar(); // page alpha
 }
 
 void DashboardPage::render_title_bar()
@@ -247,25 +271,36 @@ void DashboardPage::render_title_bar()
 			IM_COL32(8, 8, 14, 255));
 	}
 
-	// "ZEROHOOK" title
+	// "ZEROHOOK" title with glow pulse
+	float glow_alpha = anim::pulse_range(0.7f, 1.0f, 1.5f);
 	ImGui::SetCursorPos(ImVec2(20, title_y));
 	ImGui::PushFont(renderer::font_title());
-	ImGui::TextColored(COL_ACCENT, "ZEROHOOK");
+	ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.0f, glow_alpha), "ZEROHOOK");
 	ImGui::PopFont();
 
-	// "Dashboard" label
+	// "Dashboard" label with fade
+	float dash_alpha = anim::fade_in(m_enter_time + 0.2f, 0.4f);
 	ImGui::SetCursorPos(ImVec2(175, text_y));
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, dash_alpha);
 	ImGui::PushFont(renderer::font_bold());
 	ImGui::TextColored(COL_DIM, "Dashboard");
 	ImGui::PopFont();
+	ImGui::PopStyleVar();
 
-	// user info — dynamic positioning
+	// user info — staggered fade from right
 	auto& state = app::state();
-	char user_buf[256];
-	snprintf(user_buf, sizeof(user_buf), "%s  |  %s",
-		state.session.username.c_str(), state.session.subscription.plan.c_str());
-	float user_w = ImGui::CalcTextSize(user_buf).x;
-	float user_x = W - 80 - user_w - 16;
+	float info_alpha = anim::fade_in(m_enter_time + 0.4f, 0.4f);
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, info_alpha);
+
+	ImGui::PushFont(renderer::font_bold());
+	float username_w = ImGui::CalcTextSize(state.session.username.c_str()).x;
+	float plan_w = ImGui::CalcTextSize(state.session.subscription.plan.c_str()).x;
+	float logout_w = ImGui::CalcTextSize("Logout").x;
+	ImGui::PopFont();
+
+	float sep_w = ImGui::CalcTextSize("  |  ").x;
+	float total_w = username_w + sep_w + plan_w + sep_w + logout_w + 24;
+	float user_x = W - 80 - total_w;
 
 	ImGui::SetCursorPos(ImVec2(user_x, text_y));
 	ImGui::TextColored(COL_ACCENT, "%s", state.session.username.c_str());
@@ -273,6 +308,21 @@ void DashboardPage::render_title_bar()
 	ImGui::TextColored(ImVec4(0.35f, 0.35f, 0.42f, 1.0f), "|");
 	ImGui::SameLine(0, 6);
 	ImGui::TextColored(COL_DIM, "%s", state.session.subscription.plan.c_str());
+	ImGui::SameLine(0, 6);
+	ImGui::TextColored(ImVec4(0.35f, 0.35f, 0.42f, 1.0f), "|");
+	ImGui::SameLine(0, 6);
+
+	// logout button
+	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.15f, 0.15f, 0.3f));
+	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.3f, 0.3f, 1.0f));
+	float logout_btn_y = text_y - 2;
+	ImGui::SetCursorPosY(logout_btn_y);
+	if (ImGui::Button("Logout##titlebar"))
+		app::logout();
+	ImGui::PopStyleColor(3);
+
+	ImGui::PopStyleVar(); // info alpha
 
 	// minimize + close
 	ImGui::SetCursorPos(ImVec2(W - 72, btn_y));
@@ -307,13 +357,16 @@ void DashboardPage::render_game_list()
 			available.push_back(i);
 	}
 
-	// === Available ===
+	// === Available section ===
+	float section_alpha = anim::fade_in(m_enter_time + 0.2f, 0.4f);
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, section_alpha);
+
 	ImGui::SetCursorPos(ImVec2(14, 14));
 	{
-		// small accent dot before section title
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		ImVec2 wp = ImGui::GetWindowPos();
-		dl->AddCircleFilled(ImVec2(wp.x + 14, wp.y + 22), 4.0f, U32_GREEN);
+		float pulse_r = 4.0f + anim::pulse_range(0.0f, 1.0f, 2.5f);
+		dl->AddCircleFilled(ImVec2(wp.x + 14, wp.y + 22), pulse_r, U32_GREEN);
 	}
 	ImGui::SetCursorPos(ImVec2(26, 14));
 	ImGui::PushFont(renderer::font_bold());
@@ -321,6 +374,8 @@ void DashboardPage::render_game_list()
 	ImGui::PopFont();
 	ImGui::SameLine(0, 6);
 	ImGui::TextColored(COL_DIM, "(%d)", (int)available.size());
+
+	ImGui::PopStyleVar(); // section alpha
 
 	// thin separator
 	float sep_y = ImGui::GetCursorPosY() + 2;
@@ -335,14 +390,18 @@ void DashboardPage::render_game_list()
 	}
 	else
 	{
+		int stagger_i = 0;
 		for (int idx : available)
-			draw_game_entry(idx, games[idx], false);
+			draw_game_entry(idx, games[idx], false, m_enter_time, stagger_i++);
 	}
 
 	ImGui::Spacing();
 	ImGui::Spacing();
 
-	// === Unavailable ===
+	// === Unavailable section ===
+	float section2_alpha = anim::fade_in(m_enter_time + 0.5f, 0.4f);
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, section2_alpha);
+
 	float uav_y = ImGui::GetCursorPosY();
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -356,6 +415,8 @@ void DashboardPage::render_game_list()
 	ImGui::SameLine(0, 6);
 	ImGui::TextColored(COL_DIM, "(%d)", (int)unavailable.size());
 
+	ImGui::PopStyleVar(); // section2 alpha
+
 	sep_y = ImGui::GetCursorPosY() + 2;
 	draw_h_line(12, LEFT_PANEL_WIDTH - 12, sep_y, U32_SEPARATOR);
 	ImGui::SetCursorPosY(sep_y + 6);
@@ -368,19 +429,26 @@ void DashboardPage::render_game_list()
 	}
 	else
 	{
+		int stagger_i = (int)available.size(); // continue stagger index
 		for (int idx : unavailable)
-			draw_game_entry(idx, games[idx], true);
+			draw_game_entry(idx, games[idx], true, m_enter_time, stagger_i++);
 	}
 }
 
 void DashboardPage::render_patch_notes()
 {
+	float notes_alpha = anim::fade_in(m_enter_time + 0.3f, 0.5f);
+	float notes_slide = anim::slide_in(m_enter_time + 0.3f, 15.0f, 0.5f);
+
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, notes_alpha);
+
 	// header with accent dot
-	float header_y = 14;
+	float header_y = 14 + notes_slide;
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		ImVec2 wp = ImGui::GetWindowPos();
-		dl->AddCircleFilled(ImVec2(wp.x + 18, wp.y + header_y + 8), 4.0f, U32_ACCENT);
+		dl->AddCircleFilled(ImVec2(wp.x + 18, wp.y + header_y + 8), 4.0f,
+			IM_COL32(255, 107, 0, (int)(255 * notes_alpha)));
 	}
 
 	ImGui::SetCursorPos(ImVec2(30, header_y));
@@ -400,6 +468,8 @@ void DashboardPage::render_patch_notes()
 	ImGui::TextUnformatted(state.session.patch_notes.c_str());
 	ImGui::PopStyleColor();
 	ImGui::PopTextWrapPos();
+
+	ImGui::PopStyleVar(); // notes alpha
 }
 
 void DashboardPage::render_bottom_bar()
@@ -415,7 +485,10 @@ void DashboardPage::render_bottom_bar()
 	const float btn_h = 28.0f;
 	const float btn_y = (BAR_H - btn_h) * 0.5f;
 
-	// bottom bar background drawn manually for accent top line
+	// bottom bar fade
+	float bar_alpha = anim::fade_in(m_enter_time + 0.5f, 0.4f);
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, bar_alpha);
+
 	ImGui::SetCursorPos(ImVec2(0, y));
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.035f, 0.035f, 0.05f, 1.0f));
 	ImGui::BeginChild("##bottom_bar", ImVec2(W, BAR_H), ImGuiChildFlags_None);
@@ -425,6 +498,16 @@ void DashboardPage::render_bottom_bar()
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		ImVec2 wp = ImGui::GetWindowPos();
 		dl->AddRectFilled(wp, ImVec2(wp.x + W, wp.y + 1), IM_COL32(255, 107, 0, 60));
+
+		// shimmer sweep across bottom bar
+		float sx = anim::shimmer_x(W, 0.3f, m_enter_time + 0.5f);
+		float sw = 50.0f;
+		if (sx > 0 && sx < W)
+		{
+			ImU32 shimmer = IM_COL32(255, 200, 120, 40);
+			dl->AddRectFilled(
+				ImVec2(wp.x + sx, wp.y), ImVec2(wp.x + sx + sw, wp.y + 1), shimmer);
+		}
 	}
 
 	// === left: ZeroHook.gg + Discord ===
@@ -496,5 +579,7 @@ void DashboardPage::render_bottom_bar()
 	ImGui::TextColored(COL_DIM, "%s", exp_buf);
 
 	ImGui::EndChild();
-	ImGui::PopStyleColor();
+	ImGui::PopStyleColor(); // child bg
+
+	ImGui::PopStyleVar(); // bar alpha
 }

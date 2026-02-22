@@ -2,6 +2,7 @@
 #include "../app.h"
 #include "../system_check/system_info.h"
 #include "../renderer/renderer.h"
+#include "../renderer/anim.h"
 
 #include <imgui.h>
 #include <shellapi.h>
@@ -9,6 +10,7 @@
 void SystemCheckPage::on_enter()
 {
 	m_checks_done = false;
+	m_force_skip = false;
 	app::state().checks = system_info::run_all_checks();
 	m_checks_done = true;
 }
@@ -24,7 +26,6 @@ static const ImVec4 COL_YELLOW  = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
 static const ImVec4 COL_DIM     = ImVec4(0.48f, 0.48f, 0.55f, 1.0f);
 static const ImVec4 COL_TEXT    = ImVec4(0.92f, 0.92f, 0.95f, 1.0f);
 
-// draw accent horizontal line
 static void draw_accent_line(float x1, float x2, float y, float thickness = 2.0f)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -32,33 +33,46 @@ static void draw_accent_line(float x1, float x2, float y, float thickness = 2.0f
 	dl->AddLine(ImVec2(wp.x + x1, wp.y + y), ImVec2(wp.x + x2, wp.y + y), U32_ACCENT, thickness);
 }
 
-// draw a filled circle status indicator
-static void draw_status_dot(float x, float y, bool passed, float radius = 5.0f)
+static void draw_status_dot(float x, float y, bool passed, float enter_time, int index)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	ImVec2 wp = ImGui::GetWindowPos();
 	ImVec2 center(wp.x + x, wp.y + y);
-	ImU32 col = passed ? IM_COL32(76, 242, 115, 255) : IM_COL32(255, 72, 72, 255);
-	ImU32 glow = passed ? IM_COL32(76, 242, 115, 40) : IM_COL32(255, 72, 72, 40);
-	dl->AddCircleFilled(center, radius + 3, glow);
-	dl->AddCircleFilled(center, radius, col);
+
+	float alpha = anim::stagger(enter_time + 0.3f, index, 0.15f, 0.4f);
+	float scale = anim::stagger(enter_time + 0.3f, index, 0.15f, 0.3f);
+
+	ImU32 col = passed
+		? IM_COL32(76, 242, 115, (int)(255 * alpha))
+		: IM_COL32(255, 72, 72, (int)(255 * alpha));
+	ImU32 glow = passed
+		? IM_COL32(76, 242, 115, (int)(40 * alpha))
+		: IM_COL32(255, 72, 72, (int)(40 * alpha));
+
+	float r = 5.0f * scale;
+	dl->AddCircleFilled(center, r + 3, glow);
+	dl->AddCircleFilled(center, r, col);
 }
 
-static void draw_check_row(float base_x, const char* label, const system_info::check_result_t& check)
+static void draw_check_row(float base_x, const char* label, const system_info::check_result_t& check,
+	float enter_time, int index)
 {
-	float cy = ImGui::GetCursorPosY();
-	// status dot
-	draw_status_dot(base_x + 6, cy + 10, check.passed);
+	float alpha = anim::stagger(enter_time + 0.3f, index, 0.15f, 0.4f);
+	float slide = anim::slide_stagger(enter_time + 0.3f, index, 15.0f, 0.15f, 0.4f);
 
-	// label
-	ImGui::SetCursorPos(ImVec2(base_x + 22, cy));
+	float cy = ImGui::GetCursorPosY();
+
+	draw_status_dot(base_x + 6, cy + 10 + slide, check.passed, enter_time, index);
+
+	ImGui::SetCursorPos(ImVec2(base_x + 22, cy + slide));
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
 	ImGui::PushFont(renderer::font_bold());
 	ImGui::TextColored(COL_TEXT, "%s", label);
 	ImGui::PopFont();
 
-	// detail on the right
 	ImGui::SameLine(base_x + 220);
 	ImGui::TextColored(COL_DIM, "%s", check.detail.c_str());
+	ImGui::PopStyleVar();
 
 	ImGui::SetCursorPosY(cy + 32);
 }
@@ -68,9 +82,11 @@ void SystemCheckPage::render()
 	const float W = (float)renderer::WINDOW_WIDTH;
 	const float H = (float)renderer::WINDOW_HEIGHT;
 	const float TITLE_H = 44.0f;
+	float page_alpha = anim::fade_in(m_enter_time, 0.3f);
 
 	ImGui::SetNextWindowPos(ImVec2(0, 0));
 	ImGui::SetNextWindowSize(ImVec2(W, H));
+	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, page_alpha);
 	ImGui::Begin("##system_check", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
 		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
@@ -82,9 +98,11 @@ void SystemCheckPage::render()
 	float btn_h = 28.0f;
 	float btn_y = (TITLE_H - btn_h) * 0.5f;
 
+	// ZEROHOOK with glow pulse
+	float glow_alpha = anim::pulse_range(0.7f, 1.0f, 1.5f);
 	ImGui::SetCursorPos(ImVec2(20, title_y));
 	ImGui::PushFont(renderer::font_title());
-	ImGui::TextColored(COL_ACCENT, "ZEROHOOK");
+	ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.0f, glow_alpha), "ZEROHOOK");
 	ImGui::PopFont();
 
 	ImGui::SetCursorPos(ImVec2(W - 72, btn_y));
@@ -96,32 +114,40 @@ void SystemCheckPage::render()
 		renderer::request_close();
 	ImGui::PopStyleColor();
 
-	// accent line under title
 	draw_accent_line(0, W, TITLE_H, 2.0f);
 
-	// === content card ===
+	// === card with slide-up + fade ===
 	float card_w = 520.0f;
-	float card_h = 340.0f;
+	float card_h = 400.0f;
 	float card_x = (W - card_w) * 0.5f;
-	float card_y = (H - card_h) * 0.5f - 16;
+	float card_base_y = (H - card_h) * 0.5f - 16;
+	float card_slide = anim::slide_in(m_enter_time, 30.0f, 0.4f);
+	float card_y = card_base_y + card_slide;
 
-	// card background
 	ImGui::SetCursorPos(ImVec2(card_x, card_y));
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.065f, 0.065f, 0.09f, 1.0f));
 	ImGui::BeginChild("##check_card", ImVec2(card_w, card_h), ImGuiChildFlags_None);
 
-	// accent top edge on card
+	// accent top edge + shimmer
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		ImVec2 wp = ImGui::GetWindowPos();
 		dl->AddRectFilled(wp, ImVec2(wp.x + card_w, wp.y + 2), U32_ACCENT);
-		// subtle glow below accent edge
 		dl->AddRectFilledMultiColor(
 			ImVec2(wp.x, wp.y + 2), ImVec2(wp.x + card_w, wp.y + 12),
 			U32_ACCENT50, U32_ACCENT50, IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0));
+
+		// shimmer sweep
+		float sx = anim::shimmer_x(card_w, 0.4f, m_enter_time);
+		float sw = 40.0f;
+		if (sx > 0 && sx < card_w)
+		{
+			ImU32 shimmer = IM_COL32(255, 200, 120, 60);
+			dl->AddRectFilled(
+				ImVec2(wp.x + sx, wp.y), ImVec2(wp.x + sx + sw, wp.y + 2), shimmer);
+		}
 	}
 
-	// title
 	ImGui::SetCursorPos(ImVec2(32, 24));
 	ImGui::PushFont(renderer::font_title());
 	ImGui::TextColored(COL_TEXT, "System Compatibility");
@@ -135,27 +161,38 @@ void SystemCheckPage::render()
 	if (!m_checks_done)
 	{
 		ImGui::SetCursorPosX(32);
-		ImGui::TextColored(COL_ACCENT, "Running checks...");
+		// animated dots
+		int dots = ((int)(anim::time() * 3.0f)) % 4;
+		const char* dot_str[] = { "", ".", "..", "..." };
+		ImGui::TextColored(COL_ACCENT, "Running checks%s", dot_str[dots]);
 	}
 	else
 	{
 		auto& checks = app::state().checks;
 
-		ImGui::SetCursorPosY(90);
-		draw_check_row(32, "Hyper-V", checks.hyperv);
-		draw_check_row(32, "Windows Version", checks.windows);
-		draw_check_row(32, "Secure Boot", checks.secure_boot);
-		draw_check_row(32, "TPM Module", checks.tpm);
+		ImGui::SetCursorPosY(84);
+		draw_check_row(32, "CPU Vendor", checks.cpu_vendor, m_enter_time, 0);
+		draw_check_row(32, "Hyper-V", checks.hyperv, m_enter_time, 1);
+		draw_check_row(32, "Windows Version", checks.windows, m_enter_time, 2);
+		draw_check_row(32, "Secure Boot", checks.secure_boot, m_enter_time, 3);
+		draw_check_row(32, "PDB Loader", checks.pdb_loader, m_enter_time, 4);
 
 		ImGui::Spacing();
 
-		// warnings
+		float warn_alpha = anim::fade_in(m_enter_time + 1.0f, 0.5f);
+		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, warn_alpha);
+
+		if (!checks.cpu_vendor.passed)
+		{
+			ImGui::SetCursorPosX(32);
+			ImGui::TextColored(COL_RED, "! Intel CPU required. AMD is not supported.");
+		}
 		if (!checks.hyperv.passed)
 		{
 			ImGui::SetCursorPosX(32);
 			ImGui::TextColored(COL_RED, "! Hyper-V is required. Enable it in Windows Features.");
 		}
-		else if (!checks.windows.passed)
+		if (!checks.windows.passed)
 		{
 			ImGui::SetCursorPosX(32);
 			ImGui::TextColored(COL_RED, "! Windows 10 Build 19041+ is required.");
@@ -163,46 +200,69 @@ void SystemCheckPage::render()
 		if (!checks.secure_boot.passed)
 		{
 			ImGui::SetCursorPosX(32);
-			ImGui::TextColored(COL_YELLOW, "! Secure Boot off. Some features may not work.");
+			ImGui::TextColored(COL_RED, "! Secure Boot must be disabled in BIOS/UEFI settings.");
 		}
-		if (!checks.tpm.passed)
+		if (!checks.pdb_loader.passed)
 		{
 			ImGui::SetCursorPosX(32);
-			ImGui::TextColored(COL_YELLOW, "! No TPM detected. HWID spoofer requires TPM.");
+			ImGui::TextColored(COL_YELLOW, "! PDB loader unavailable. Install VS Build Tools or place msdia140.dll next to exe.");
 		}
 
+		ImGui::PopStyleVar();
+
 		ImGui::Spacing();
 		ImGui::Spacing();
 
-		// continue button
+		// buttons fade in after checks
+		float btn_alpha = anim::fade_in(m_enter_time + 1.2f, 0.4f);
+		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, btn_alpha);
+
 		bool can_continue = checks.all_critical_passed();
-		if (!can_continue) ImGui::BeginDisabled();
 
+		// Continue button (centered with force skip to the right)
 		float btn_w = 200.0f;
-		float btn_ht = 36.0f;
-		ImGui::SetCursorPosX((card_w - btn_w) * 0.5f);
+		float total_w = btn_w + 100.0f; // continue + gap + skip
+		float start_x = (card_w - total_w) * 0.5f;
+
+		ImGui::SetCursorPosX(start_x);
+
+		if (!can_continue && !m_force_skip) ImGui::BeginDisabled();
 
 		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.42f, 0.0f, 1.0f));
 		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.55f, 0.16f, 1.0f));
 		ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.8f, 0.33f, 0.0f, 1.0f));
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
 
-		if (ImGui::Button("Continue", ImVec2(btn_w, btn_ht)))
+		if (ImGui::Button("Continue", ImVec2(btn_w, 36)))
 			app::navigate_to(page_id::login);
 
 		ImGui::PopStyleColor(4);
 
-		if (!can_continue) ImGui::EndDisabled();
+		if (!can_continue && !m_force_skip) ImGui::EndDisabled();
+
+		// Force skip link
+		ImGui::SameLine(0, 16);
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.06f));
+		ImGui::PushStyleColor(ImGuiCol_Text, COL_DIM);
+
+		if (ImGui::Button("Force Skip >>", ImVec2(0, 36)))
+		{
+			m_force_skip = true;
+			app::navigate_to(page_id::login);
+		}
+
+		ImGui::PopStyleColor(3);
+
+		ImGui::PopStyleVar();
 	}
 
 	ImGui::EndChild();
 	ImGui::PopStyleColor();
 
-	// === footer ===
+	// footer
 	float footer_y = H - 32;
-	float footer_text_y = footer_y + 6;
-
-	ImGui::SetCursorPos(ImVec2(20, footer_text_y));
+	ImGui::SetCursorPos(ImVec2(20, footer_y + 6));
 	ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.0f, 0.6f), "ZeroHook.gg");
 
 	float discord_w = ImGui::CalcTextSize("Discord").x + 24;
@@ -217,4 +277,5 @@ void SystemCheckPage::render()
 	renderer::draw_window_border();
 
 	ImGui::End();
+	ImGui::PopStyleVar(); // page alpha
 }

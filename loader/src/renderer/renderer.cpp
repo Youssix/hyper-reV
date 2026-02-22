@@ -52,12 +52,13 @@ namespace renderer
 		{
 		case WM_NCHITTEST:
 		{
-			// title bar drag: top 42px, but NOT the right 90px (close/minimize buttons)
+			// title bar drag: top 42px, only left portion (logo + label area)
+			// right side has user info, logout button, min/close — must stay clickable
 			POINT pt;
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
 			ScreenToClient(hWnd, &pt);
-			if (pt.y < 42 && pt.x < WINDOW_WIDTH - 90)
+			if (pt.y < 42 && pt.x < 280)
 				return HTCAPTION;
 			return HTCLIENT;
 		}

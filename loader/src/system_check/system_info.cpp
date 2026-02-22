@@ -1,13 +1,32 @@
 #include "system_info.h"
 #include <Windows.h>
 #include <intrin.h>
-#include <tbs.h>
 #include <cstdio>
-
-#pragma comment(lib, "tbs.lib")
+#include <cstring>
 
 namespace system_info
 {
+	check_result_t check_cpu_vendor()
+	{
+		check_result_t result;
+
+		int regs[4] = {};
+		__cpuid(regs, 0);
+
+		char vendor[13] = {};
+		memcpy(vendor + 0, &regs[1], 4); // EBX
+		memcpy(vendor + 4, &regs[3], 4); // EDX
+		memcpy(vendor + 8, &regs[2], 4); // ECX
+		vendor[12] = '\0';
+
+		result.passed = (strcmp(vendor, "GenuineIntel") == 0);
+		result.detail = vendor;
+		if (!result.passed)
+			result.detail += " (Intel CPU required)";
+
+		return result;
+	}
+
 	check_result_t check_hyperv()
 	{
 		check_result_t result;
@@ -34,7 +53,7 @@ namespace system_info
 		else if (cpuid_hv)
 			result.detail = "Hypervisor detected (CPUID)";
 		else
-			result.detail = "Hyper-V not detected — enable in Windows Features";
+			result.detail = "Hyper-V not detected";
 
 		return result;
 	}
@@ -76,83 +95,77 @@ namespace system_info
 	{
 		check_result_t result;
 
-		BYTE value = 0;
-		DWORD size = GetFirmwareEnvironmentVariableA(
-			"SecureBoot",
-			"{8be4df61-93ca-11d2-aa0d-00e098032b8c}",
-			&value, sizeof(value));
-
-		if (size > 0)
+		HKEY hkey;
+		if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+			"SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\State", 0,
+			KEY_READ, &hkey) == ERROR_SUCCESS)
 		{
-			result.passed = (value == 1);
-			result.detail = value ? "Secure Boot ON" : "Secure Boot OFF";
-		}
-		else
-		{
-			// GetFirmwareEnvironmentVariable fails on legacy BIOS
-			DWORD err = GetLastError();
-			if (err == ERROR_INVALID_FUNCTION)
+			DWORD value = 0;
+			DWORD size = sizeof(value);
+			if (RegQueryValueExA(hkey, "UEFISecureBootEnabled", nullptr,
+				nullptr, (LPBYTE)&value, &size) == ERROR_SUCCESS)
 			{
-				result.passed = false;
-				result.detail = "Legacy BIOS (no UEFI)";
+				result.passed = (value == 0);
+				result.detail = value ? "Secure Boot ON (must be disabled)" : "Secure Boot OFF";
 			}
 			else
 			{
 				result.passed = false;
-				result.detail = "Cannot query Secure Boot";
+				result.detail = "Secure Boot state unknown";
 			}
+			RegCloseKey(hkey);
+		}
+		else
+		{
+			// Key doesn't exist on legacy BIOS systems
+			result.passed = false;
+			result.detail = "Legacy BIOS (UEFI required)";
 		}
 
 		return result;
 	}
 
-	check_result_t check_tpm()
+	check_result_t check_pdb_loader()
 	{
 		check_result_t result;
 
-		TBS_CONTEXT_PARAMS2 params = {};
-		params.version = TBS_CONTEXT_VERSION_TWO;
-		TBS_HCONTEXT ctx = 0;
-
-		TBS_RESULT tbs_result = Tbsi_Context_Create(
-			(PCTBS_CONTEXT_PARAMS)&params, &ctx);
-
-		if (tbs_result == TBS_SUCCESS)
+		// PDB symbol resolution needs msdia140.dll (DIA SDK)
+		// The pdb_load() function uses NoRegCoCreate as fallback,
+		// which just needs the DLL loadable from search path
+		HMODULE hmod = LoadLibraryW(L"msdia140.dll");
+		if (hmod)
 		{
 			result.passed = true;
-			result.detail = "TPM 2.0 available";
-			Tbsip_Context_Close(ctx);
+			result.detail = "PDB loader ready (msdia140.dll)";
+			FreeLibrary(hmod);
+			return result;
 		}
-		else
+
+		// check if registered as COM server (Visual Studio installed)
+		HKEY hkey;
+		if (RegOpenKeyExA(HKEY_CLASSES_ROOT,
+			"TypeLib\\{108296C1-281E-11d3-BD22-0000F80849BD}", 0,
+			KEY_READ, &hkey) == ERROR_SUCCESS)
 		{
-			// try TPM 1.2
-			TBS_CONTEXT_PARAMS params1 = {};
-			params1.version = TBS_CONTEXT_VERSION_ONE;
-			tbs_result = Tbsi_Context_Create(&params1, &ctx);
-
-			if (tbs_result == TBS_SUCCESS)
-			{
-				result.passed = true;
-				result.detail = "TPM 1.2 available";
-				Tbsip_Context_Close(ctx);
-			}
-			else
-			{
-				result.passed = false;
-				result.detail = "No TPM detected";
-			}
+			result.passed = true;
+			result.detail = "PDB loader ready (DIA SDK registered)";
+			RegCloseKey(hkey);
+			return result;
 		}
 
+		result.passed = false;
+		result.detail = "msdia140.dll not found";
 		return result;
 	}
 
 	system_checks_t run_all_checks()
 	{
 		system_checks_t checks;
+		checks.cpu_vendor  = check_cpu_vendor();
 		checks.hyperv      = check_hyperv();
 		checks.windows     = check_windows_version();
 		checks.secure_boot = check_secure_boot();
-		checks.tpm         = check_tpm();
+		checks.pdb_loader  = check_pdb_loader();
 		return checks;
 	}
 }
