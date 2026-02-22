@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cctype>
 #include <algorithm>
+#include "../widgets/ui_helpers.h"
 
 std::string DisassemblerPanel::try_read_string(uint64_t address, int max_len)
 {
@@ -934,10 +935,10 @@ void DisassemblerPanel::render()
 				{
 					char buf[32];
 					snprintf(buf, sizeof(buf), "0x%llX", line.address);
-					ImGui::SetClipboardText(buf);
+					ui::clipboard(buf, "Address copied");
 				}
 				if (ImGui::MenuItem("Copy Module+Offset"))
-					ImGui::SetClipboardText(mod_addr.c_str());
+					ui::clipboard(mod_addr.c_str(), "Address copied");
 
 				if (ImGui::MenuItem("Copy Line"))
 				{
@@ -951,7 +952,7 @@ void DisassemblerPanel::render()
 					if (!line.comment.empty())
 						full_line += " ; " + line.comment;
 
-					ImGui::SetClipboardText(full_line.c_str());
+					ui::clipboard(full_line.c_str(), "Copied");
 				}
 
 				if (ImGui::MenuItem("Copy Bytes"))
@@ -964,7 +965,7 @@ void DisassemblerPanel::render()
 						snprintf(hb, sizeof(hb), "%02X", line.bytes[j]);
 						hex += hb;
 					}
-					ImGui::SetClipboardText(hex.c_str());
+					ui::clipboard(hex.c_str(), "Bytes copied");
 				}
 
 				if (ImGui::MenuItem("Make Signature"))
@@ -1179,7 +1180,7 @@ void DisassemblerPanel::render()
 		ImGui::Spacing();
 
 		if (ImGui::Button("Copy", ImVec2(80, 0)))
-			ImGui::SetClipboardText(m_sig_pattern.c_str());
+			ui::clipboard(m_sig_pattern.c_str(), "Signature copied");
 
 		ImGui::SameLine(0, 8);
 		if (ImGui::Button("Scan in Scanner", ImVec2(120, 0)))
@@ -1394,6 +1395,6 @@ void DisassemblerPanel::render()
 		if (!line.comment.empty())
 			full_line += " ; " + line.comment;
 
-		ImGui::SetClipboardText(full_line.c_str());
+		ui::clipboard(full_line.c_str(), "Copied");
 	}
 }

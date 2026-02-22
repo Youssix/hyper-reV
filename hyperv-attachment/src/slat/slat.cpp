@@ -8,6 +8,7 @@
 #include "cr3/pte.h"
 #include "hook/hook.h"
 #include "monitor/monitor.h"
+#include "violation/mtf_context.h"
 #include "slat_def.h"
 
 namespace
@@ -30,6 +31,7 @@ void slat::set_up()
 {
 	hook::set_up_entries();
 	monitor::set_up_entries();
+	mtf::set_up();
 	set_up_dummy_page();
 }
 

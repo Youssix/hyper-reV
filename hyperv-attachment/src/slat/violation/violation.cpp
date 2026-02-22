@@ -1,6 +1,8 @@
 #include "violation.h"
+#include "mtf_context.h"
 #include "../cr3/cr3.h"
 #include "../cr3/pte.h"
+#include "../cr3/fork_registry.h"
 #include "../hook/hook_entry.h"
 #include "../monitor/monitor_entry.h"
 
@@ -9,6 +11,14 @@
 #include "../../crt/crt.h"
 #include "../../structures/virtual_address.h"
 #include "../../cr3_intercept.h"
+
+#ifdef _INTELMACHINE
+namespace slat::violation
+{
+	// Per-VPID pending GPA for fork sync (checked by Hook 2 after Hyper-V handler)
+	std::uint64_t fork_sync_pending_gpa[mtf::max_contexts] = { };
+}
+#endif
 
 std::uint8_t slat::violation::process()
 {
@@ -73,9 +83,22 @@ std::uint8_t slat::violation::process()
 
 	if (hook_entry == nullptr)
 	{
+		// Check if this violation is in a forked region — queue for sync after Hyper-V handles it
+		const virtual_address_t gpa = { .address = physical_address };
+
+		if (fork_registry::is_in_forked_region(gpa.pml4_idx, gpa.pdpt_idx, gpa.pd_idx))
+		{
+			const std::uint16_t vpid = arch::get_current_vpid();
+
+			if (vpid < mtf::max_contexts)
+			{
+				fork_sync_pending_gpa[vpid] = physical_address;
+			}
+		}
+
 		// Always restore hyperv_cr3 before falling through to Hyper-V.
 		// If we're on hook_cr3 (from a previous toggle), Hyper-V doesn't
-		// recognize that EPTP and will VMRESUME without fixing → loop → BSOD.
+		// recognize that EPTP and will VMRESUME without fixing -> loop -> BSOD.
 		set_cr3(hyperv_cr3());
 		return 0;
 	}
@@ -91,7 +114,7 @@ std::uint8_t slat::violation::process()
 		// If the game thread is under the original CR3, the JMP would #PF.
 		// MmAccessFault can't fix this because KPTI overwrites our CR3 swap
 		// on the return-to-user path (MOV CR3, user_dtb happens AFTER MmAccessFault
-		// returns but BEFORE IRETQ), causing an infinite #PF loop → bugcheck 0x139.
+		// returns but BEFORE IRETQ), causing an infinite #PF loop -> bugcheck 0x139.
 		// Fix: swap guest CR3 to clone here in VMX root, before VMRESUME.
 		if (cr3_intercept::enabled)
 		{
@@ -112,11 +135,46 @@ std::uint8_t slat::violation::process()
 			}
 		}
 	}
+	else if (qualification.write_access)
+	{
+		// Write to hooked page on hook_cr3 (R-- permission)
+		// Grant temp RW, arm MTF to restore R-- and sync shadow after one instruction
+		const std::uint16_t vpid = arch::get_current_vpid();
+
+		if (vpid >= mtf::max_contexts)
+		{
+			// Cannot arm MTF for this VPID — fall through to Hyper-V
+			set_cr3(hyperv_cr3());
+			return 0;
+		}
+
+		const virtual_address_t gpa = { .address = physical_address };
+
+		slat_pte* const hook_pte = get_pte(hook_cr3(), gpa);
+
+		if (hook_pte != nullptr)
+		{
+			const std::uint64_t saved_flags = hook_pte->flags;
+
+			// Grant temporary write access
+			hook_pte->read_access = 1;
+			hook_pte->write_access = 1;
+
+			// Arm MTF context for this LP
+			mtf::arm(vpid, physical_address, hook_pte, saved_flags);
+
+			// Enable monitor trap flag — fires after next guest instruction
+			arch::enable_mtf();
+
+			// Flush EPT cache so the temp permission takes effect
+			flush_current_logical_processor_cache();
+		}
+	}
 	else
 	{
 		set_cr3(hook_cr3());
 
-		// page is now rw-, and with original pfn
+		// page is now r--, and with original pfn
 	}
 #else
 	const vmcb_t* const vmcb = arch::get_vmcb();

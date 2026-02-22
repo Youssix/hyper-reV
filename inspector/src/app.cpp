@@ -5,6 +5,7 @@
 #include "hypercall/hypercall.h"
 #include "widgets/module_resolver.h"
 #include "widgets/filter_bar.h"
+#include "widgets/ui_helpers.h"
 
 #include "panels/memory_viewer.h"
 #include "panels/scanner.h"
@@ -18,6 +19,7 @@
 #include "panels/pointer_scanner.h"
 #include "panels/code_filter.h"
 #include "panels/watch_list.h"
+#include "panels/function_filter.h"
 
 #include <imgui_internal.h>
 #include <print>
@@ -28,7 +30,7 @@ namespace app
 {
 	static app_state_t s_state;
 
-	static constexpr int PANEL_COUNT = 12;
+	static constexpr int PANEL_COUNT = 13;
 	static std::unique_ptr<IPanel> s_panels[PANEL_COUNT];
 
 	static constexpr float STATUS_BAR_HEIGHT = 32.0f;
@@ -66,6 +68,7 @@ namespace app
 		case tab_id::code_filter:    return "CodeFilter";
 		case tab_id::watch_list:     return "Watch List";
 		case tab_id::system_info:    return "System";
+		case tab_id::function_filter:return "FuncFilter";
 		}
 		return "Unknown";
 	}
@@ -101,6 +104,7 @@ namespace app
 		s_panels[9]  = std::make_unique<CodeFilterPanel>();
 		s_panels[10] = std::make_unique<WatchListPanel>();
 		s_panels[11] = std::make_unique<SystemInfoPanel>();
+		s_panels[12] = std::make_unique<FunctionFilterPanel>();
 	}
 
 	void shutdown()
@@ -269,27 +273,39 @@ namespace app
 
 		if (s_state.process_attached)
 		{
-			ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "%s (PID:%llu)",
-				s_state.attached_process.name.c_str(), s_state.attached_process.pid);
-			ImGui::SameLine(0, 20);
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "|");
-			ImGui::SameLine(0, 20);
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "CR3: 0x%llX",
+			ImGui::TextColored(ImVec4(0.92f, 0.92f, 0.94f, 1.0f), "%s",
+				s_state.attached_process.name.c_str());
+			ImGui::SameLine(0, 6);
+			ImGui::TextColored(ImVec4(0.38f, 0.38f, 0.43f, 1.0f), "PID %llu",
+				s_state.attached_process.pid);
+
+			ImGui::SameLine(0, 14);
+			ImGui::TextColored(ImVec4(0.28f, 0.28f, 0.35f, 1.0f), "\xC2\xB7"); // middle dot
+			ImGui::SameLine(0, 14);
+			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "CR3");
+			ImGui::SameLine(0, 6);
+			ImGui::TextColored(ImVec4(0.60f, 0.60f, 0.66f, 1.0f), "0x%llX",
 				s_state.attached_process.cr3);
-			ImGui::SameLine(0, 20);
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "|");
-			ImGui::SameLine(0, 20);
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Modules: %d",
+
+			ImGui::SameLine(0, 14);
+			ImGui::TextColored(ImVec4(0.28f, 0.28f, 0.35f, 1.0f), "\xC2\xB7");
+			ImGui::SameLine(0, 14);
+			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Modules");
+			ImGui::SameLine(0, 6);
+			ImGui::TextColored(ImVec4(0.60f, 0.60f, 0.66f, 1.0f), "%d",
 				(int)widgets::g_modules.size());
-			ImGui::SameLine(0, 20);
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "|");
-			ImGui::SameLine(0, 20);
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Heap: %llu pages",
+
+			ImGui::SameLine(0, 14);
+			ImGui::TextColored(ImVec4(0.28f, 0.28f, 0.35f, 1.0f), "\xC2\xB7");
+			ImGui::SameLine(0, 14);
+			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Heap");
+			ImGui::SameLine(0, 6);
+			ImGui::TextColored(ImVec4(0.60f, 0.60f, 0.66f, 1.0f), "%llu pg",
 				hypercall::get_heap_free_page_count());
 		}
 		else
 		{
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "No process attached");
+			ImGui::TextColored(ImVec4(0.38f, 0.38f, 0.43f, 1.0f), "No process attached");
 		}
 
 		const char* status = s_state.hv_connected ? "Ready" : "HV Offline";
@@ -327,34 +343,49 @@ namespace app
 			ImGui::PushFont(renderer::font_bold());
 			ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.0f, 1.0f), "%s", s_state.attached_process.name.c_str());
 			ImGui::PopFont();
+			ImGui::Spacing();
 
+			constexpr float LABEL_W = 80.0f;
+
+			ImGui::PushFont(renderer::font_small());
 			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "PID");
-			ImGui::SameLine(70);
+			ImGui::PopFont();
+			ImGui::SameLine(LABEL_W);
 			ImGui::Text("%llu", s_state.attached_process.pid);
 
+			ImGui::PushFont(renderer::font_small());
 			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "CR3");
-			ImGui::SameLine(70);
+			ImGui::PopFont();
+			ui::tooltip("Page table root (DirectoryTableBase) for this process");
+			ImGui::SameLine(LABEL_W);
 			ImGui::PushFont(renderer::font_mono());
 			ImGui::Text("0x%llX", s_state.attached_process.cr3);
 			ImGui::PopFont();
 
+			ImGui::PushFont(renderer::font_small());
 			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Base");
-			ImGui::SameLine(70);
+			ImGui::PopFont();
+			ui::tooltip("Main module base address");
+			ImGui::SameLine(LABEL_W);
 			ImGui::PushFont(renderer::font_mono());
 			ImGui::Text("0x%llX", s_state.attached_process.base_address);
 			ImGui::PopFont();
 
+			ImGui::PushFont(renderer::font_small());
 			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "EPROCESS");
-			ImGui::SameLine(70);
+			ImGui::PopFont();
+			ui::tooltip("Kernel EPROCESS structure address");
+			ImGui::SameLine(LABEL_W);
 			ImGui::PushFont(renderer::font_mono());
 			ImGui::Text("0x%llX", s_state.attached_process.eprocess);
 			ImGui::PopFont();
 
 			ImGui::Spacing();
+			ImGui::Spacing();
 
-			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.15f, 0.1f, 0.8f));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.15f, 0.9f));
-			if (ImGui::Button("Detach", ImVec2(-1, 28)))
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.12f, 0.08f, 0.7f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.18f, 0.12f, 0.9f));
+			if (ImGui::Button("Detach", ImVec2(-1, 26)))
 				detach_process();
 			ImGui::PopStyleColor(2);
 
@@ -363,18 +394,32 @@ namespace app
 				ImGui::Spacing();
 				ImGui::Separator();
 				ImGui::Spacing();
+
+				ImGui::PushFont(renderer::font_small());
 				ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "HV Heap");
-				ImGui::SameLine(70);
+				ImGui::PopFont();
+				ui::tooltip("Free hypervisor heap pages available for EPT operations");
+				ImGui::SameLine(LABEL_W);
 				ImGui::Text("%llu pages", hypercall::get_heap_free_page_count());
 			}
+
+			ImGui::Spacing();
+			ImGui::Separator();
+			ImGui::Spacing();
+
+			// keyboard shortcuts hint
+			ImGui::PushFont(renderer::font_small());
+			ImGui::TextColored(ImVec4(0.35f, 0.35f, 0.42f, 1.0f), "Ctrl+1..9  Switch panels");
+			ImGui::PopFont();
 		}
 		else
 		{
-			ImGui::PushFont(renderer::font_bold());
-			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "No process");
-			ImGui::PopFont();
 			ImGui::Spacing();
-			ImGui::TextWrapped("Click \"Attach Process...\" above to select a process.");
+			ImGui::TextColored(ImVec4(0.42f, 0.42f, 0.48f, 1.0f), "No process attached");
+			ImGui::Spacing();
+			ImGui::PushFont(renderer::font_small());
+			ImGui::TextWrapped("Click \"Attach Process\" above to select a target process.");
+			ImGui::PopFont();
 		}
 	}
 
@@ -406,11 +451,15 @@ namespace app
 				s_modal_processes = sys::process::enumerate_processes();
 				s_modal_last_refresh = anim::time();
 			}
-			ImGui::SameLine(0, 16);
+			ImGui::SameLine(0, 12);
 			widgets::filter_bar("##attach_filter", s_modal_filter, 300.0f);
-			ImGui::SameLine();
+			ImGui::SameLine(0, 12);
 			ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f),
-				"(%d)", (int)s_modal_processes.size());
+				"%d processes", (int)s_modal_processes.size());
+			ImGui::SameLine(0, 20);
+			ImGui::PushFont(renderer::font_small());
+			ImGui::TextColored(ImVec4(0.35f, 0.35f, 0.42f, 1.0f), "Double-click to attach");
+			ImGui::PopFont();
 
 			ImGui::Spacing();
 
@@ -518,11 +567,10 @@ namespace app
 		ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.14f, &dock_sidebar, &dock_rest);
 
 		ImGuiID dock_main, dock_bottom;
-		ImGui::DockBuilderSplitNode(dock_rest, ImGuiDir_Down, 0.30f, &dock_bottom, &dock_main);
+		ImGui::DockBuilderSplitNode(dock_rest, ImGuiDir_Down, 0.45f, &dock_bottom, &dock_main);
 
 		ImGui::DockBuilderDockWindow("Process Info", dock_sidebar);
 
-		ImGui::DockBuilderDockWindow("Memory", dock_main);
 		ImGui::DockBuilderDockWindow("Disasm", dock_main);
 		ImGui::DockBuilderDockWindow("Modules", dock_main);
 		ImGui::DockBuilderDockWindow("Threads", dock_main);
@@ -532,7 +580,9 @@ namespace app
 		ImGui::DockBuilderDockWindow("Ptr Scan", dock_main);
 		ImGui::DockBuilderDockWindow("CodeFilter", dock_main);
 		ImGui::DockBuilderDockWindow("Watch List", dock_main);
+		ImGui::DockBuilderDockWindow("FuncFilter", dock_main);
 		ImGui::DockBuilderDockWindow("System", dock_main);
+		ImGui::DockBuilderDockWindow("Memory", dock_main); // last = active tab
 
 		ImGui::DockBuilderDockWindow("Scanner", dock_bottom);
 
@@ -618,6 +668,9 @@ namespace app
 		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_9)) switch_tab(tab_id::pointer_scanner);
 		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_0)) switch_tab(tab_id::system_info);
 
+		// toast notifications
+		ui::render_toast();
+
 		// accent border around main viewport (viewport-aware coordinates)
 		{
 			ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -659,6 +712,16 @@ namespace app
 	}
 
 	app_state_t& state() { return s_state; }
+
+	IPanel* get_panel(tab_id id)
+	{
+		for (auto& p : s_panels)
+		{
+			if (p && p->get_id() == id)
+				return p.get();
+		}
+		return nullptr;
+	}
 
 	// ---- Cross-panel helpers ----
 
@@ -706,16 +769,20 @@ namespace app
 
 	// ---- Shared log dispatcher ----
 
-	void register_page_monitor(uint64_t gpa, std::function<void(const trap_frame_log_t&)> callback)
+	static uint32_t s_next_monitor_id = 1;
+
+	uint32_t register_page_monitor(uint64_t gpa, std::function<void(const trap_frame_log_t&)> callback)
 	{
-		s_page_monitors.push_back({ gpa, callback });
+		uint32_t id = s_next_monitor_id++;
+		s_page_monitors.push_back({ id, gpa, std::move(callback) });
+		return id;
 	}
 
-	void unregister_page_monitor(uint64_t gpa)
+	void unregister_page_monitor(uint32_t id)
 	{
 		s_page_monitors.erase(
 			std::remove_if(s_page_monitors.begin(), s_page_monitors.end(),
-				[gpa](const page_monitor_callback_t& m) { return m.gpa == gpa; }),
+				[id](const page_monitor_callback_t& m) { return m.id == id; }),
 			s_page_monitors.end());
 	}
 

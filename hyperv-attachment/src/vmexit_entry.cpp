@@ -4,6 +4,7 @@
 #include "slat/slat.h"
 #include "slat/cr3/cr3.h"
 #include "slat/violation/violation.h"
+#include "slat/violation/mtf_context.h"
 #include "interrupts/interrupts.h"
 #include "cr3_intercept.h"
 #include <structures/trap_frame.h>
@@ -40,6 +41,19 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
     }
 
     const std::uint64_t exit_reason = arch::get_vmexit_reason();
+
+#ifdef _INTELMACHINE
+    if (arch::is_mtf(exit_reason))
+    {
+        if (slat::mtf::process() == 1)
+        {
+            return 1;
+        }
+
+        // Not our MTF — fall through to Hyper-V
+        return 0;
+    }
+#endif
 
     if (arch::is_mov_cr(exit_reason) == 1)
     {

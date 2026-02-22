@@ -319,7 +319,14 @@ std::uint64_t ept_hook_code_impl(const cr3& slat_cr3, std::uint64_t target_va, s
     entry.target_pa_page = target_pa_page;
     entry.shadow_heap_va = shadow_va;
 
-    return 1;
+    // 11. Arm diagnostic: watch this PFN for EPT violations
+    cr3_intercept::diag_watch_pfn = target_pa_page >> 12;
+    cr3_intercept::diag_watch_pfn_exec_count = 0;
+    cr3_intercept::diag_watch_pfn_rw_count = 0;
+
+    // Encode target_pa_page into upper bits of success result so DLL can log it
+    // Result: bits [63:12] = target_pa_page, bits [11:0] = 1 (success)
+    return (target_pa_page & ~0xFFFull) | 1;
 }
 
 std::uint64_t ept_unhook_code_impl(const cr3& slat_cr3, std::uint64_t target_va)
@@ -938,12 +945,16 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
         else if (hypercall_info.call_reserved_data == 20)
         {
             // process_command: NtClose relay dispatcher
-            // Params passed through from ring-0 shellcode (loaded from KTRAP_FRAME):
-            //   RDX = command ID, R8 = arg1, R9 = arg2
-            // Returns result in RAX
-            const std::uint64_t command_id = trap_frame->rdx;
-            const std::uint64_t arg1 = trap_frame->r8;
-            const std::uint64_t arg2 = trap_frame->r9;
+            // Encoding: RDX = (arg1 << 8) | cmd_byte
+            //   KiSystemCall64 only saves RCX (via R10) and RDX to KTRAP_FRAME
+            //   for syscalls with few args. R8/R9 are NOT saved reliably.
+            //   So we pack cmd + arg1 into RDX. For 2-arg commands, arg2 is
+            //   pre-stored via STORE_ARG (cmd 0xFE) call.
+            static std::uint64_t stored_relay_arg = 0;
+            const std::uint64_t raw_rdx = trap_frame->rdx;
+            const std::uint64_t command_id = raw_rdx & 0xFF;
+            const std::uint64_t arg1 = raw_rdx >> 8;
+            const std::uint64_t arg2 = stored_relay_arg;
             const cr3 slat_cr3_cmd = slat::hyperv_cr3();
 
             switch (command_id)
@@ -968,6 +979,185 @@ void hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
                 break;
             case 6: // alloc_hidden_page()
                 trap_frame->rax = alloc_hidden_page_impl();
+                break;
+            case 7: // diag_ept_hook(arg1=target_va): re-translate VA, compare with hooked GPA, return diagnostic
+            {
+                // Returns packed result:
+                //   bits [63:32] = diag_watch_pfn_exec_count (capped to 32 bits)
+                //   bits [31:16] = diag_watch_pfn_rw_count (capped to 16 bits)
+                //   bits [15:1]  = 0
+                //   bit  [0]     = 1 if current GPA matches hooked GPA, 0 if mismatch
+                const cr3 original_cr3 = { .flags = cr3_intercept::target_original_cr3 };
+                const std::uint64_t current_pa = memory_manager::translate_guest_virtual_address(
+                    original_cr3, slat_cr3_cmd, { .address = arg1 });
+                const std::uint64_t current_pa_page = current_pa & ~0xFFFull;
+
+                // Find the hooked GPA for this VA
+                std::uint64_t gpa_match = 0;
+                const auto* hook = cr3_intercept::find_usermode_ept_hook(current_pa_page);
+                if (hook != nullptr)
+                    gpa_match = 1;
+
+                const std::uint64_t exec_count = cr3_intercept::diag_watch_pfn_exec_count;
+                const std::uint64_t rw_count = cr3_intercept::diag_watch_pfn_rw_count;
+
+                trap_frame->rax = ((exec_count & 0xFFFFFFFF) << 32)
+                    | ((rw_count & 0xFFFF) << 16)
+                    | gpa_match;
+                break;
+            }
+            case 8: // diag_read_shadow(arg1=target_va): read first 8 bytes from shadow page at function offset
+            {
+                // Returns the first 8 bytes of the shadow page at the hooked offset
+                // This lets the DLL verify the JMP bytes are present
+                const cr3 original_cr3 = { .flags = cr3_intercept::target_original_cr3 };
+                const std::uint64_t pa = memory_manager::translate_guest_virtual_address(
+                    original_cr3, slat_cr3_cmd, { .address = arg1 });
+                const std::uint64_t pa_page = pa & ~0xFFFull;
+                const std::uint64_t offset = pa & 0xFFF;
+
+                const auto* hook = cr3_intercept::find_usermode_ept_hook(pa_page);
+                if (hook != nullptr && hook->shadow_heap_va != nullptr)
+                {
+                    const auto* shadow_bytes = static_cast<const std::uint8_t*>(hook->shadow_heap_va) + offset;
+                    std::uint64_t result = 0;
+                    crt::copy_memory(&result, shadow_bytes, 8);
+                    trap_frame->rax = result;
+                }
+                else
+                {
+                    trap_frame->rax = 0;
+                }
+                break;
+            }
+            case 9: // diag_echo_args: return arg1 in low 32, arg2 in high 32 — tests KTRAP_FRAME offsets
+            {
+                // Pack: bits [63:32] = arg2 low 32 bits, bits [31:0] = arg1 low 32 bits
+                trap_frame->rax = ((arg2 & 0xFFFFFFFF) << 32) | (arg1 & 0xFFFFFFFF);
+                break;
+            }
+            case 10: // diag_translate_verbose(arg1=target_va): step-by-step page table walk diagnostic
+            {
+                // Returns packed result:
+                //   bits [3:0]  = fail_level (0=cr3_not_set, 1=pml4_map, 2=pml4e_np, 3=pdpt_map, 4=pdpte_np,
+                //                             5=pd_map, 6=pde_np, 7=pt_map, 8=pte_np, 0xF=success)
+                //   bit  [4]    = large_page encountered
+                //   bit  [5]    = heap_overlap (failing PA is in heap range)
+                //   bits [7:6]  = reserved
+                //   bits [63:8] = relevant PA >> 8 (GPA at failing level, or translated GPA on success)
+                const cr3 original_cr3 = { .flags = cr3_intercept::target_original_cr3 };
+
+                if (original_cr3.flags == 0)
+                {
+                    trap_frame->rax = 0; // fail_level=0: cr3 not set
+                    break;
+                }
+
+                const std::uint64_t heap_base = heap_manager::initial_physical_base;
+                const std::uint64_t heap_end = heap_base + heap_manager::initial_size;
+
+                auto in_heap = [&](std::uint64_t pa) -> bool {
+                    const std::uint64_t pa_page = pa & ~0xFFFull;
+                    return pa_page >= heap_base && pa_page < heap_end;
+                };
+
+                const virtual_address_t va = { .address = arg1 };
+                std::uint64_t result_pa = 0;
+                std::uint64_t fail_level = 0;
+                std::uint64_t large_page = 0;
+                std::uint64_t heap_hit = 0;
+
+                // Level 1: map PML4
+                const std::uint64_t pml4_gpa = original_cr3.address_of_page_directory << 12;
+                const auto pml4 = static_cast<const pml4e_64*>(
+                    memory_manager::map_guest_physical(slat_cr3_cmd, pml4_gpa));
+                if (pml4 == nullptr) {
+                    fail_level = 1; result_pa = pml4_gpa;
+                    heap_hit = in_heap(pml4_gpa) ? 1 : 0;
+                } else {
+                    const pml4e_64 pml4e = pml4[va.pml4_idx];
+                    if (pml4e.present == 0) {
+                        fail_level = 2; result_pa = pml4_gpa;
+                    } else {
+                        // Level 2: map PDPT
+                        const std::uint64_t pdpt_gpa = pml4e.page_frame_number << 12;
+                        const auto pdpt = static_cast<const pdpte_64*>(
+                            memory_manager::map_guest_physical(slat_cr3_cmd, pdpt_gpa));
+                        if (pdpt == nullptr) {
+                            fail_level = 3; result_pa = pdpt_gpa;
+                            heap_hit = in_heap(pdpt_gpa) ? 1 : 0;
+                        } else {
+                            const pdpte_64 pdpte = pdpt[va.pdpt_idx];
+                            if (pdpte.present == 0) {
+                                fail_level = 4; result_pa = pdpt_gpa;
+                            } else if (pdpte.large_page == 1) {
+                                fail_level = 0xF; large_page = 1;
+                                const pdpte_1gb_64 lp = { .flags = pdpte.flags };
+                                const std::uint64_t offset = (va.pd_idx << 21) + (va.pt_idx << 12) + va.offset;
+                                result_pa = (lp.page_frame_number << 30) + offset;
+                            } else {
+                                // Level 3: map PD
+                                const std::uint64_t pd_gpa = pdpte.page_frame_number << 12;
+                                const auto pd = static_cast<const pde_64*>(
+                                    memory_manager::map_guest_physical(slat_cr3_cmd, pd_gpa));
+                                if (pd == nullptr) {
+                                    fail_level = 5; result_pa = pd_gpa;
+                                    heap_hit = in_heap(pd_gpa) ? 1 : 0;
+                                } else {
+                                    const pde_64 pde = pd[va.pd_idx];
+                                    if (pde.present == 0) {
+                                        fail_level = 6; result_pa = pd_gpa;
+                                    } else if (pde.large_page == 1) {
+                                        fail_level = 0xF; large_page = 1;
+                                        const pde_2mb_64 lp = { .flags = pde.flags };
+                                        const std::uint64_t offset = (va.pt_idx << 12) + va.offset;
+                                        result_pa = (lp.page_frame_number << 21) + offset;
+                                    } else {
+                                        // Level 4: map PT
+                                        const std::uint64_t pt_gpa = pde.page_frame_number << 12;
+                                        const auto pt = static_cast<const pte_64*>(
+                                            memory_manager::map_guest_physical(slat_cr3_cmd, pt_gpa));
+                                        if (pt == nullptr) {
+                                            fail_level = 7; result_pa = pt_gpa;
+                                            heap_hit = in_heap(pt_gpa) ? 1 : 0;
+                                        } else {
+                                            const pte_64 pte = pt[va.pt_idx];
+                                            if (pte.present == 0) {
+                                                fail_level = 8; result_pa = pt_gpa;
+                                            } else {
+                                                fail_level = 0xF; // success
+                                                result_pa = (pte.page_frame_number << 12) + va.offset;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Also check if the failing PA (page table page) is in heap range
+                if (heap_hit == 0 && fail_level != 0xF && fail_level >= 2)
+                    heap_hit = in_heap(result_pa) ? 1 : 0;
+
+                trap_frame->rax = (result_pa & ~0xFFull) // bits [63:8] = PA >> 0 (aligned to 256)
+                    | (heap_hit << 5)
+                    | (large_page << 4)
+                    | (fail_level & 0xF);
+                break;
+            }
+            case 11: // diag_heap_info: return heap base and size for overlap checking
+            {
+                // arg1=0: return heap_base, arg1=1: return heap_end
+                if (arg1 == 0)
+                    trap_frame->rax = heap_manager::initial_physical_base;
+                else
+                    trap_frame->rax = heap_manager::initial_physical_base + heap_manager::initial_size;
+                break;
+            }
+            case 0xFE: // store_arg: pre-store arg1 for the next 2-arg command
+                stored_relay_arg = arg1;
+                trap_frame->rax = 1;
                 break;
             default:
                 trap_frame->rax = 0;

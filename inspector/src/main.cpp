@@ -1,5 +1,6 @@
 #include "renderer/renderer.h"
 #include "app.h"
+#include "server/http_server.h"
 
 #include <Windows.h>
 
@@ -17,14 +18,17 @@ int WINAPI WinMain(
 	}
 
 	app::initialize();
+	server::start();
 
 	while (!renderer::should_close())
 	{
+		server::tick();
 		renderer::begin_frame();
 		app::render();
 		renderer::end_frame();
 	}
 
+	server::stop();
 	app::shutdown();
 	renderer::shutdown();
 

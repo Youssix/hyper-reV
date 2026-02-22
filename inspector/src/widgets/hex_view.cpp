@@ -2,6 +2,7 @@
 #include "../memory/memory_reader.h"
 #include "../renderer/renderer.h"
 #include "module_resolver.h"
+#include "ui_helpers.h"
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -294,16 +295,16 @@ namespace widgets
 					{
 						char abuf[32];
 						snprintf(abuf, sizeof(abuf), "0x%llX", cell_addr);
-						ImGui::SetClipboardText(abuf);
+						ui::clipboard(abuf, "Address copied");
 					}
 					if (ImGui::MenuItem("Copy Module+Offset"))
-						ImGui::SetClipboardText(ctx_mod.c_str());
+						ui::clipboard(ctx_mod.c_str(), "Address copied");
 
 					if (ImGui::MenuItem("Copy Value"))
 					{
 						char vbuf[32];
 						format_cell(vbuf, sizeof(vbuf), line_data + byte_offset, state.display_mode);
-						ImGui::SetClipboardText(vbuf);
+						ui::clipboard(vbuf, "Copied");
 					}
 
 					if (sel_min >= 0 && sel_max > sel_min)
@@ -324,7 +325,7 @@ namespace widgets
 								snprintf(hb, sizeof(hb), "%02X", byte_val);
 								aob += hb;
 							}
-							ImGui::SetClipboardText(aob.c_str());
+							ui::clipboard(aob.c_str(), "Bytes copied");
 						}
 
 						if (ImGui::MenuItem("Copy Selection as C Array"))
@@ -341,7 +342,7 @@ namespace widgets
 								arr += hb;
 							}
 							arr += " }";
-							ImGui::SetClipboardText(arr.c_str());
+							ui::clipboard(arr.c_str(), "C array copied");
 						}
 					}
 
@@ -519,7 +520,7 @@ namespace widgets
 					snprintf(hb, sizeof(hb), "%02X", byte_val);
 					hex += hb;
 				}
-				ImGui::SetClipboardText(hex.c_str());
+				ui::clipboard(hex.c_str(), "Bytes copied");
 			}
 			else if (state.selected_offset >= 0)
 			{
@@ -528,7 +529,7 @@ namespace widgets
 				memory::read(data, a, csz);
 				char buf[32];
 				format_cell(buf, sizeof(buf), data, state.display_mode);
-				ImGui::SetClipboardText(buf);
+				ui::clipboard(buf, "Copied");
 			}
 		}
 

@@ -71,6 +71,26 @@ void slat::hook::entry_t::set_paging_split_state(const std::uint64_t paging_spli
 	paging_split_state_ = paging_split_state;
 }
 
+std::uint64_t slat::hook::entry_t::hook_byte_offset() const
+{
+	return hook_byte_offset_;
+}
+
+std::uint64_t slat::hook::entry_t::hook_byte_length() const
+{
+	return hook_byte_length_;
+}
+
+void slat::hook::entry_t::set_hook_byte_offset(const std::uint64_t offset)
+{
+	hook_byte_offset_ = offset;
+}
+
+void slat::hook::entry_t::set_hook_byte_length(const std::uint64_t length)
+{
+	hook_byte_length_ = length;
+}
+
 slat::hook::entry_t* slat::hook::entry_t::find(const std::uint64_t target_original_4kb_pfn, entry_t** const previous_entry_out)
 {
 	entry_t* current_entry = used_hook_list_head;

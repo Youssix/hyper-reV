@@ -4,6 +4,7 @@
 #include "../memory/memory_reader.h"
 #include "../widgets/module_resolver.h"
 #include "hypercall/hypercall.h"
+#include "../widgets/ui_helpers.h"
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
@@ -324,7 +325,7 @@ void PointerScannerPanel::render()
 								snprintf(buf, sizeof(buf), " -> -0x%llX", (uint64_t)(-off));
 							str += buf;
 						}
-						ImGui::SetClipboardText(str.c_str());
+						ui::clipboard(str.c_str(), "Copied");
 					}
 					ImGui::EndPopup();
 				}

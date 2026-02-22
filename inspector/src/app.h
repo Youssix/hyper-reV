@@ -37,6 +37,8 @@ namespace app
 	void shutdown();
 	void render();
 
+	IPanel* get_panel(tab_id id);
+
 	void switch_tab(tab_id tab);
 	void navigate_to_address(uint64_t address, tab_id target_tab = tab_id::memory_viewer);
 	void attach_process(const sys::process_info_t& process);
@@ -63,11 +65,12 @@ namespace app
 	// shared log dispatcher for EPT page monitoring
 	struct page_monitor_callback_t
 	{
+		uint32_t id;
 		uint64_t gpa;
 		std::function<void(const trap_frame_log_t&)> callback;
 	};
 
-	void register_page_monitor(uint64_t gpa, std::function<void(const trap_frame_log_t&)> callback);
-	void unregister_page_monitor(uint64_t gpa);
+	uint32_t register_page_monitor(uint64_t gpa, std::function<void(const trap_frame_log_t&)> callback);
+	void unregister_page_monitor(uint32_t id);
 	void flush_shared_logs();
 }

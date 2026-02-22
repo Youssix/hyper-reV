@@ -1,0 +1,32 @@
+interface ApiResponse {
+    ok: boolean;
+    data?: any;
+    error?: string;
+}
+export declare function getStatus(): Promise<ApiResponse>;
+export declare function listProcesses(): Promise<ApiResponse>;
+export declare function attachProcess(nameOrPid: string): Promise<ApiResponse>;
+export declare function detachProcess(): Promise<ApiResponse>;
+export declare function readMemory(address: string, size: number): Promise<ApiResponse>;
+export declare function writeMemory(address: string, bytes: string): Promise<ApiResponse>;
+export declare function readValue(address: string, type: string): Promise<ApiResponse>;
+export declare function writeValue(address: string, type: string, value: number | string): Promise<ApiResponse>;
+export declare function disassemble(address: string, count: number): Promise<ApiResponse>;
+export declare function resolveAddress(address: string): Promise<ApiResponse>;
+export declare function listModules(): Promise<ApiResponse>;
+export declare function findExport(name: string, module?: string): Promise<ApiResponse>;
+export declare function startCodeFilter(address: string): Promise<ApiResponse>;
+export declare function stopCodeFilter(): Promise<ApiResponse>;
+export declare function getCodeFilterResults(): Promise<ApiResponse>;
+export declare function addBreakpoint(address: string, label?: string): Promise<ApiResponse>;
+export declare function removeBreakpoint(address: string): Promise<ApiResponse>;
+export declare function listBreakpoints(): Promise<ApiResponse>;
+export declare function getBreakpointLogs(limit?: number): Promise<ApiResponse>;
+export declare function ffLoadFunctions(module: string, source: string): Promise<ApiResponse>;
+export declare function ffStartMonitoring(): Promise<ApiResponse>;
+export declare function ffStopMonitoring(): Promise<ApiResponse>;
+export declare function ffKeepExecuted(): Promise<ApiResponse>;
+export declare function ffRemoveExecuted(): Promise<ApiResponse>;
+export declare function ffStatus(): Promise<ApiResponse>;
+export declare function ffGetFunctions(limit?: number): Promise<ApiResponse>;
+export {};

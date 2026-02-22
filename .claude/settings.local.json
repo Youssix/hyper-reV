@@ -3,7 +3,20 @@
     "allow": [
       "Bash(powershell.exe -Command \"Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V | Select-Object FeatureName, State\")",
       "mcp__sequential-thinking__sequentialthinking",
-      "Bash(reg query:*)"
+      "Bash(reg query:*)",
+      "WebSearch",
+      "WebFetch(domain:windows-internals.com)",
+      "WebFetch(domain:blog.quarkslab.com)",
+      "WebFetch(domain:connormcgarr.github.io)",
+      "WebFetch(domain:momo5502.com)",
+      "WebFetch(domain:tandasat.github.io)",
+      "Bash(cmd.exe:*)"
     ]
+  },
+  "mcpServers": {
+    "hyperrev-inspector": {
+      "command": "node",
+      "args": ["D:/Games/HyperREV/hyper-reV/inspector-mcp/dist/index.js"]
+    }
   }
 }

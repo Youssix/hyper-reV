@@ -4,6 +4,7 @@
 #include "../renderer/anim.h"
 #include "../memory/memory_reader.h"
 #include "../widgets/module_resolver.h"
+#include "../widgets/ui_helpers.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -267,9 +268,9 @@ void WatchListPanel::render()
 					app::request_code_filter(e.address);
 				ImGui::Separator();
 				if (ImGui::MenuItem("Copy Address"))
-					ImGui::SetClipboardText(addr_buf);
+					ui::clipboard(addr_buf, "Address copied");
 				if (ImGui::MenuItem("Copy Value"))
-					ImGui::SetClipboardText(e.value_str.c_str());
+					ui::clipboard(e.value_str.c_str(), "Value copied");
 				ImGui::Separator();
 				if (ImGui::MenuItem("Delete"))
 					remove_idx = i;

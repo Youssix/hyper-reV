@@ -5,6 +5,7 @@
 #include "../memory/memory_reader.h"
 #include "../widgets/module_resolver.h"
 #include "../widgets/address_input.h"
+#include "../widgets/ui_helpers.h"
 #include "hypercall/hypercall.h"
 #include <cstdio>
 #include <cstring>
@@ -159,23 +160,28 @@ void BreakpointsPanel::render()
 		m_last_flush = anim::time();
 	}
 
-	// ---- Top: Add breakpoint + breakpoint list ----
-	ImGui::Text("Address:");
+	// ---- Top: Add breakpoint controls ----
+	ImGui::PushFont(renderer::font_small());
+	ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Address");
+	ImGui::PopFont();
 	ImGui::SameLine();
 	ImGui::PushItemWidth(180);
-	ImGui::InputText("##bp_addr", m_addr_buf, sizeof(m_addr_buf), ImGuiInputTextFlags_CharsHexadecimal);
+	ImGui::InputTextWithHint("##bp_addr", "7FF6A1B20000", m_addr_buf, sizeof(m_addr_buf), ImGuiInputTextFlags_CharsHexadecimal);
 	ImGui::PopItemWidth();
 
-	ImGui::SameLine(0, 8);
-	ImGui::Text("Label:");
+	ImGui::SameLine(0, 10);
+	ImGui::PushFont(renderer::font_small());
+	ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Label");
+	ImGui::PopFont();
 	ImGui::SameLine();
 	ImGui::PushItemWidth(150);
-	ImGui::InputText("##bp_label", m_label_buf, sizeof(m_label_buf));
+	ImGui::InputTextWithHint("##bp_label", "optional", m_label_buf, sizeof(m_label_buf));
 	ImGui::PopItemWidth();
 
-	ImGui::SameLine(0, 8);
+	ImGui::SameLine(0, 10);
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.4f, 0.1f, 0.8f));
-	if (ImGui::Button("Add BP", ImVec2(70, 28)))
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.5f, 0.15f, 1.0f));
+	if (ImGui::Button("Add", ImVec2(60, 28)))
 	{
 		uint64_t addr = strtoull(m_addr_buf, nullptr, 16);
 		if (addr)
@@ -185,9 +191,9 @@ void BreakpointsPanel::render()
 			m_label_buf[0] = '\0';
 		}
 	}
-	ImGui::PopStyleColor();
+	ImGui::PopStyleColor(2);
 
-	ImGui::SameLine(0, 16);
+	ImGui::SameLine(0, 20);
 	if (ImGui::Button("Clear Log", ImVec2(80, 28)))
 		m_log_entries.clear();
 
@@ -199,9 +205,9 @@ void BreakpointsPanel::render()
 
 	// breakpoint list
 	ImGui::BeginChild("##bp_list", ImVec2(-1, bp_height), true);
-	ImGui::PushFont(renderer::font_bold());
-	ImGui::Text("Breakpoints (%d)", (int)m_breakpoints.size());
-	ImGui::PopFont();
+	ui::section("Breakpoints", renderer::font_bold());
+	ImGui::SameLine();
+	ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "(%d)", (int)m_breakpoints.size());
 
 	if (ImGui::BeginTable("##bptable", 6,
 		ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
@@ -212,8 +218,8 @@ void BreakpointsPanel::render()
 		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 160.0f);
 		ImGui::TableSetupColumn("Page GPA", ImGuiTableColumnFlags_WidthFixed, 160.0f);
-		ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-		ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+		ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+		ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 40.0f);
 		ImGui::TableHeadersRow();
 
 		int remove_idx = -1;
@@ -245,9 +251,14 @@ void BreakpointsPanel::render()
 			ImGui::Text("0x%llX", bp.physical_address);
 			ImGui::PopFont();
 
-			// hits
+			// hits (color-coded: white < 100, orange < 10000, red >= 10000)
 			ImGui::TableNextColumn();
-			ImGui::Text("%d", bp.hit_count);
+			if (bp.hit_count >= 10000)
+				ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.2f, 1.0f), "%d", bp.hit_count);
+			else if (bp.hit_count >= 100)
+				ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%d", bp.hit_count);
+			else
+				ImGui::Text("%d", bp.hit_count);
 
 			// remove
 			ImGui::TableNextColumn();
@@ -270,12 +281,22 @@ void BreakpointsPanel::render()
 
 	// ---- Bottom: Log table ----
 	ImGui::BeginChild("##bp_log", ImVec2(-1, -1), true);
-	ImGui::PushFont(renderer::font_bold());
-	ImGui::Text("Log (%d entries)", (int)m_log_entries.size());
-	ImGui::PopFont();
+
+	ui::section("Trap Log", renderer::font_bold());
+	ImGui::SameLine();
+	ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "(%d entries)", (int)m_log_entries.size());
+	if ((int)m_log_entries.size() > 2000)
+	{
+		ImGui::SameLine(0, 8);
+		ImGui::PushFont(renderer::font_small());
+		ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.1f, 1.0f), "showing last 2000");
+		ImGui::PopFont();
+	}
 
 	ImGui::SameLine(0, 16);
-	ImGui::Text("Filter BP:");
+	ImGui::PushFont(renderer::font_small());
+	ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Filter");
+	ImGui::PopFont();
 	ImGui::SameLine();
 	ImGui::PushItemWidth(120);
 	const char* bp_filter_preview = m_filter_bp_idx < 0 ? "All" :
@@ -345,7 +366,7 @@ void BreakpointsPanel::render()
 				{
 					char buf[32];
 					snprintf(buf, sizeof(buf), "0x%llX", log.rip);
-					ImGui::SetClipboardText(buf);
+					ui::clipboard(buf, "RIP copied");
 				}
 				if (ImGui::MenuItem("Copy Row"))
 				{
@@ -353,7 +374,7 @@ void BreakpointsPanel::render()
 					snprintf(row_buf, sizeof(row_buf),
 						"RIP=0x%llX CR3=0x%llX RAX=0x%llX RCX=0x%llX RDX=0x%llX RSP=0x%llX",
 						log.rip, log.cr3, log.rax, log.rcx, log.rdx, log.rsp);
-					ImGui::SetClipboardText(row_buf);
+					ui::clipboard(row_buf, "Row copied");
 				}
 				ImGui::EndPopup();
 			}
@@ -388,4 +409,28 @@ void BreakpointsPanel::render()
 
 	ImGui::PopFont();
 	ImGui::EndChild();
+}
+
+void BreakpointsPanel::api_remove(uint64_t va)
+{
+	for (int i = 0; i < (int)m_breakpoints.size(); i++)
+	{
+		if (m_breakpoints[i].virtual_address == va)
+		{
+			remove_breakpoint(i);
+			return;
+		}
+	}
+}
+
+std::vector<trap_frame_log_t> BreakpointsPanel::api_logs(int limit) const
+{
+	if (limit <= 0 || limit >= (int)m_log_entries.size())
+		return m_log_entries;
+
+	// return the most recent entries
+	return std::vector<trap_frame_log_t>(
+		m_log_entries.end() - limit,
+		m_log_entries.end()
+	);
 }

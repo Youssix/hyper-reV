@@ -14,7 +14,8 @@ enum class tab_id
 	pointer_scanner,
 	code_filter,
 	watch_list,
-	system_info
+	system_info,
+	function_filter
 };
 
 class IPanel

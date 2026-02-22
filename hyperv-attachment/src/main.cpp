@@ -12,7 +12,9 @@
 #include "interrupts/interrupts.h"
 #include "slat/slat.h"
 #include "slat/cr3/cr3.h"
+#include "slat/cr3/fork_registry.h"
 #include "slat/violation/violation.h"
+#include "slat/violation/mtf_context.h"
 #include "cr3_intercept.h"
 
 #ifndef _INTELMACHINE
@@ -98,6 +100,15 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 
         const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
 
+        // Check if violation handler queued a fork sync for this LP
+        const std::uint16_t vpid = arch::get_current_vpid();
+
+        if (vpid < slat::mtf::max_contexts && slat::violation::fork_sync_pending_gpa[vpid] != 0)
+        {
+            slat::fork_registry::sync_forked_entry(slat::violation::fork_sync_pending_gpa[vpid]);
+            slat::violation::fork_sync_pending_gpa[vpid] = 0;
+        }
+
         // Restore hook EPTP after Hyper-V's handler returns.
         // Read fresh metadata in case Hyper-V modified any EPTP bits during handling.
         cr3 restored_eptp = arch::get_slat_cr3();
@@ -107,7 +118,27 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
         return result;
     }
 
-    return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+    const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+
+    // Check fork sync even when not on hook_cr3 — Hook 1 may have swapped EPTP
+    // to hyperv_cr3 before falling through (e.g., unhandled EPT violation in forked region)
+    if (hk_cr3.flags != 0)
+    {
+        const std::uint16_t vpid = arch::get_current_vpid();
+
+        if (vpid < slat::mtf::max_contexts && slat::violation::fork_sync_pending_gpa[vpid] != 0)
+        {
+            slat::fork_registry::sync_forked_entry(slat::violation::fork_sync_pending_gpa[vpid]);
+            slat::violation::fork_sync_pending_gpa[vpid] = 0;
+
+            // Restore hook_cr3 EPTP since we were on it before Hook 1 swapped away
+            cr3 restored_eptp = arch::get_slat_cr3();
+            restored_eptp.address_of_page_directory = hk_cr3.address_of_page_directory;
+            arch::set_slat_cr3(restored_eptp);
+        }
+    }
+
+    return result;
 #else
     // AMD path: keep existing behavior (no fast-path entry hook on AMD)
     process_first_vmexit();

@@ -1,6 +1,7 @@
 #include "data_inspector.h"
 #include "../memory/memory_reader.h"
 #include "../renderer/renderer.h"
+#include "ui_helpers.h"
 #include <imgui.h>
 #include <cstring>
 #include <cstdio>
@@ -39,7 +40,7 @@ namespace widgets
 			snprintf(sel_id, sizeof(sel_id), "%s##di_%s", value, type_name);
 			if (ImGui::Selectable(sel_id, false, 0, ImGui::CalcTextSize(value)))
 			{
-				ImGui::SetClipboardText(value);
+				ui::clipboard(value, "Value copied");
 			}
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Click to copy");

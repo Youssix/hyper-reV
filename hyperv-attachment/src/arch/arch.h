@@ -38,6 +38,11 @@ namespace arch
 	std::uint64_t get_guest_physical_address();
 
 	void invalidate_vpid_current();
+	std::uint16_t get_current_vpid();
+
+	void enable_mtf();
+	void disable_mtf();
+	std::uint8_t is_mtf(std::uint64_t vmexit_reason);
 
 	// TSC offset manipulation (hide VMEXIT latency from guest)
 	void adjust_tsc_offset(std::int64_t delta);

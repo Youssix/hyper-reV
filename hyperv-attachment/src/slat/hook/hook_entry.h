@@ -13,7 +13,9 @@ namespace slat::hook
 		std::uint64_t original_user_mode_execute_ : 1;
 		std::uint64_t paging_split_state_ : 1;
 		std::uint64_t original_pfn_ : 36;
-		std::uint64_t reserved_ : 39;
+		std::uint64_t hook_byte_offset_ : 12;
+		std::uint64_t hook_byte_length_ : 8;
+		std::uint64_t reserved_ : 19;
 
 	public:
 		[[nodiscard]] entry_t* next() const;
@@ -28,11 +30,17 @@ namespace slat::hook
 		[[nodiscard]] std::uint64_t original_user_mode_execute() const;
 		[[nodiscard]] std::uint64_t paging_split_state() const;
 
+		[[nodiscard]] std::uint64_t hook_byte_offset() const;
+		[[nodiscard]] std::uint64_t hook_byte_length() const;
+
 		void set_original_read_access(std::uint64_t original_read_access);
 		void set_original_write_access(std::uint64_t original_write_access);
 		void set_original_execute_access(std::uint64_t original_execute_access);
 		void set_original_user_mode_execute(std::uint64_t original_user_mode_execute);
 		void set_paging_split_state(std::uint64_t paging_split_state);
+
+		void set_hook_byte_offset(std::uint64_t offset);
+		void set_hook_byte_length(std::uint64_t length);
 
 		static entry_t* find(std::uint64_t target_original_4kb_pfn, entry_t** previous_entry_out = nullptr);
 		static entry_t* find_in_2mb_range(std::uint64_t target_original_4kb_pfn, const entry_t* excluding_hook = nullptr);

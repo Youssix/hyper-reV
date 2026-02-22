@@ -23,6 +23,7 @@ namespace renderer
 	ImFont* font_bold();
 	ImFont* font_title();
 	ImFont* font_mono();
+	ImFont* font_small();
 
 	void draw_window_border();
 

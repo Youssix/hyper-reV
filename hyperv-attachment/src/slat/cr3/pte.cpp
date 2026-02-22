@@ -1,9 +1,11 @@
 #include "pte.h"
+#include "fork_registry.h"
 
 #include "../../memory_manager/memory_manager.h"
 #include "../../memory_manager/heap_manager.h"
 
 #include "../../structures/virtual_address.h"
+#include "../../crt/crt.h"
 
 slat_pml4e* slat::get_pml4e(const cr3 slat_cr3, const virtual_address_t guest_physical_address)
 {
@@ -305,3 +307,145 @@ std::uint8_t slat::is_pte_large(const void* const pte_in)
 
 	return large_pte->large_page;
 }
+
+slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, const virtual_address_t gpa, const std::uint8_t force_split)
+{
+#ifdef _INTELMACHINE
+	// Walk hook_cr3 PML4
+	slat_pml4e* const hook_pml4e = get_pml4e(hook_cr3_val, gpa);
+
+	if (hook_pml4e == nullptr || is_pte_present(hook_pml4e) == 0)
+	{
+		return nullptr;
+	}
+
+	// Compare PDPT PFN with hyperv_cr3
+	const slat_pml4e* const hyperv_pml4e = get_pml4e(hyperv_cr3_val, gpa);
+
+	if (hyperv_pml4e == nullptr || is_pte_present(hyperv_pml4e) == 0)
+	{
+		return nullptr;
+	}
+
+	// Fork PDPT if shared
+	if (hook_pml4e->page_frame_number == hyperv_pml4e->page_frame_number)
+	{
+		const auto shared_pdpt = static_cast<slat_pdpte*>(memory_manager::map_host_physical(hook_pml4e->page_frame_number << 12));
+		const auto forked_pdpt = static_cast<slat_pdpte*>(heap_manager::allocate_page());
+
+		if (forked_pdpt == nullptr)
+		{
+			return nullptr;
+		}
+
+		crt::copy_memory(forked_pdpt, shared_pdpt, sizeof(slat_pdpte) * 512);
+
+		const std::uint64_t forked_pdpt_pfn = memory_manager::unmap_host_physical(forked_pdpt) >> 12;
+
+		fork_registry::register_forked_pdpt(gpa.pml4_idx, forked_pdpt_pfn, hook_pml4e->page_frame_number);
+
+		hook_pml4e->page_frame_number = forked_pdpt_pfn;
+	}
+
+	// Now walk the (possibly forked) PDPT
+	slat_pdpte* const hook_pdpte = get_pdpte(hook_pml4e, gpa);
+
+	if (hook_pdpte == nullptr || is_pte_present(hook_pdpte) == 0)
+	{
+		return nullptr;
+	}
+
+	// Split 1GB page if needed
+	auto large_pdpte = reinterpret_cast<slat_pdpte_1gb*>(hook_pdpte);
+
+	if (large_pdpte->large_page == 1)
+	{
+		if (force_split == 0 || split_1gb_pdpte(large_pdpte) == 0)
+		{
+			return nullptr;
+		}
+
+		// Also split in hyperv_cr3 to keep structure consistent
+		slat_pdpte* const hyperv_pdpte = get_pdpte(hyperv_pml4e, gpa);
+
+		if (hyperv_pdpte != nullptr)
+		{
+			auto hyperv_large_pdpte = reinterpret_cast<slat_pdpte_1gb*>(hyperv_pdpte);
+
+			if (hyperv_large_pdpte->large_page == 1)
+			{
+				split_1gb_pdpte(hyperv_large_pdpte);
+			}
+		}
+	}
+
+	// Compare PD PFN with hyperv_cr3's PDPT entry
+	const slat_pdpte* const hyperv_pdpte = get_pdpte(hyperv_pml4e, gpa);
+
+	if (hook_pdpte->page_frame_number == hyperv_pdpte->page_frame_number)
+	{
+		const auto shared_pd = static_cast<slat_pde*>(memory_manager::map_host_physical(hook_pdpte->page_frame_number << 12));
+		const auto forked_pd = static_cast<slat_pde*>(heap_manager::allocate_page());
+
+		if (forked_pd == nullptr)
+		{
+			return nullptr;
+		}
+
+		crt::copy_memory(forked_pd, shared_pd, sizeof(slat_pde) * 512);
+
+		const std::uint64_t forked_pd_pfn = memory_manager::unmap_host_physical(forked_pd) >> 12;
+
+		fork_registry::register_forked_pd(gpa.pml4_idx, gpa.pdpt_idx, forked_pd_pfn, hook_pdpte->page_frame_number);
+
+		hook_pdpte->page_frame_number = forked_pd_pfn;
+	}
+
+	// Now walk the (possibly forked) PD
+	slat_pde* const hook_pde = get_pde(hook_pdpte, gpa);
+
+	if (hook_pde == nullptr || is_pte_present(hook_pde) == 0)
+	{
+		return nullptr;
+	}
+
+	// Split 2MB page if needed
+	auto large_pde = reinterpret_cast<slat_pde_2mb*>(hook_pde);
+
+	if (large_pde->large_page == 1)
+	{
+		if (force_split == 0 || split_2mb_pde(large_pde) == 0)
+		{
+			return nullptr;
+		}
+	}
+
+	// Compare PT PFN with hyperv_cr3's PD entry
+	const slat_pde* const hyperv_pde = get_pde(hyperv_cr3_val, gpa, force_split);
+
+	if (hyperv_pde != nullptr && hook_pde->page_frame_number == hyperv_pde->page_frame_number)
+	{
+		const auto shared_pt = static_cast<slat_pte*>(memory_manager::map_host_physical(hook_pde->page_frame_number << 12));
+		const auto forked_pt = static_cast<slat_pte*>(heap_manager::allocate_page());
+
+		if (forked_pt == nullptr)
+		{
+			return nullptr;
+		}
+
+		crt::copy_memory(forked_pt, shared_pt, sizeof(slat_pte) * 512);
+
+		const std::uint64_t forked_pt_pfn = memory_manager::unmap_host_physical(forked_pt) >> 12;
+
+		fork_registry::register_forked_pt(gpa.pml4_idx, gpa.pdpt_idx, gpa.pd_idx, forked_pt_pfn, hook_pde->page_frame_number);
+
+		hook_pde->page_frame_number = forked_pt_pfn;
+	}
+
+	return get_pte(hook_pde, gpa);
+#else
+	// AMD: no fork needed, use standard path
+	return get_pte(hook_cr3_val, gpa, force_split);
+#endif
+}
+

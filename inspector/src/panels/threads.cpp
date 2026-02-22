@@ -4,6 +4,7 @@
 #include "../widgets/module_resolver.h"
 #include "hypercall/hypercall.h"
 #include "system/system.h"
+#include "../widgets/ui_helpers.h"
 #include <cstdio>
 #include <cstring>
 
@@ -389,10 +390,10 @@ void ThreadsPanel::render()
 					{
 						char buf[32];
 						snprintf(buf, sizeof(buf), "0x%llX", f.address);
-						ImGui::SetClipboardText(buf);
+						ui::clipboard(buf, "Address copied");
 					}
 					if (ImGui::MenuItem("Copy Module+Offset"))
-						ImGui::SetClipboardText(f.module_str.c_str());
+						ui::clipboard(f.module_str.c_str(), "Address copied");
 					ImGui::EndPopup();
 				}
 

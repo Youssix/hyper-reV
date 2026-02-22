@@ -1,9 +1,11 @@
 #include "code_filter.h"
 #include "../app.h"
 #include "../renderer/renderer.h"
+#include "../renderer/anim.h"
 #include "../memory/memory_reader.h"
 #include "../widgets/address_input.h"
 #include "../widgets/module_resolver.h"
+#include "../widgets/ui_helpers.h"
 #include "hypercall/hypercall.h"
 #include <Zydis/Zydis.h>
 #include <structures/trap_frame.h>
@@ -32,7 +34,7 @@ void CodeFilterPanel::start_monitoring(uint64_t va)
 	m_monitoring = true;
 
 	// register with shared log dispatcher
-	app::register_page_monitor(page_gpa, [this](const trap_frame_log_t& log) {
+	m_monitor_id = app::register_page_monitor(page_gpa, [this](const trap_frame_log_t& log) {
 		on_log_entry(log.rip, log.cr3);
 	});
 
@@ -44,7 +46,8 @@ void CodeFilterPanel::stop_monitoring()
 	if (!m_monitoring) return;
 
 	hypercall::unmonitor_physical_page(m_target_gpa);
-	app::unregister_page_monitor(m_target_gpa);
+	app::unregister_page_monitor(m_monitor_id);
+	m_monitor_id = 0;
 	m_monitoring = false;
 }
 
@@ -145,35 +148,40 @@ void CodeFilterPanel::render()
 	}
 
 	// toolbar
-	ImGui::Text("Target Address:");
+	ImGui::PushFont(renderer::font_small());
+	ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Target Address");
+	ImGui::PopFont();
 	ImGui::SameLine();
 	ImGui::PushItemWidth(180);
-	ImGui::InputText("##cf_addr", m_addr_buf, sizeof(m_addr_buf), ImGuiInputTextFlags_CharsHexadecimal);
+	ImGui::InputTextWithHint("##cf_addr", "7FF6A1B20000", m_addr_buf, sizeof(m_addr_buf), ImGuiInputTextFlags_CharsHexadecimal);
 	ImGui::PopItemWidth();
 
-	ImGui::SameLine(0, 8);
+	ImGui::SameLine(0, 10);
 
 	if (!m_monitoring)
 	{
 		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.4f, 0.1f, 0.8f));
-		if (ImGui::Button("Find Accesses", ImVec2(120, 28)))
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.0f, 0.5f, 0.15f, 1.0f));
+		if (ImGui::Button("Find Accesses", ImVec2(110, 28)))
 		{
 			uint64_t addr = strtoull(m_addr_buf, nullptr, 16);
 			if (addr)
 				start_monitoring(addr);
 		}
-		ImGui::PopStyleColor();
+		ImGui::PopStyleColor(2);
 	}
 	else
 	{
 		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.15f, 0.1f, 0.8f));
-		if (ImGui::Button("Stop", ImVec2(80, 28)))
+		if (ImGui::Button("Stop", ImVec2(110, 28)))
 			stop_monitoring();
 		ImGui::PopStyleColor();
 
-		ImGui::SameLine(0, 16);
+		ImGui::SameLine(0, 12);
+		ui::status_dot(true);
+		ImGui::SameLine(0, 4);
 		ImGui::PushFont(renderer::font_mono());
-		ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "Monitoring 0x%llX", m_target_address);
+		ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "0x%llX", m_target_address);
 		ImGui::PopFont();
 	}
 
@@ -182,7 +190,11 @@ void CodeFilterPanel::render()
 		m_entries.clear();
 
 	ImGui::SameLine(0, 16);
-	ImGui::Text("Unique RIPs: %d", (int)m_entries.size());
+	ImGui::PushFont(renderer::font_small());
+	ImGui::TextColored(ImVec4(0.48f, 0.48f, 0.53f, 1.0f), "Unique RIPs:");
+	ImGui::PopFont();
+	ImGui::SameLine(0, 6);
+	ImGui::Text("%d", (int)m_entries.size());
 
 	ImGui::Spacing();
 
@@ -250,12 +262,12 @@ void CodeFilterPanel::render()
 				{
 					char buf[32];
 					snprintf(buf, sizeof(buf), "0x%llX", e.rip);
-					ImGui::SetClipboardText(buf);
+					ui::clipboard(buf, "RIP copied");
 				}
 				if (ImGui::MenuItem("Copy Line"))
 				{
 					std::string line = e.module_rip + "  " + e.instruction + "  " + e.access_type;
-					ImGui::SetClipboardText(line.c_str());
+					ui::clipboard(line.c_str(), "Line copied");
 				}
 				ImGui::EndPopup();
 			}
@@ -282,4 +294,16 @@ void CodeFilterPanel::render()
 	}
 
 	ImGui::PopFont();
+}
+
+void CodeFilterPanel::api_start(uint64_t va)
+{
+	if (m_monitoring)
+		stop_monitoring();
+	start_monitoring(va);
+}
+
+void CodeFilterPanel::api_stop()
+{
+	stop_monitoring();
 }

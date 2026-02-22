@@ -6,6 +6,7 @@
 #include "hypercall/hypercall.h"
 #include "system/system.h"
 #include <portable_executable/image.hpp>
+#include "../widgets/ui_helpers.h"
 #include <cstdio>
 #include <cstring>
 
@@ -489,7 +490,7 @@ void HookCheckerPanel::render()
 					{
 						char buf[32];
 						snprintf(buf, sizeof(buf), "0x%llX", r.address);
-						ImGui::SetClipboardText(buf);
+						ui::clipboard(buf, "Address copied");
 					}
 					ImGui::EndPopup();
 				}

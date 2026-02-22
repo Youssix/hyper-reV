@@ -26,10 +26,10 @@ namespace theme
 		style.TabRounding       = 4.0f;
 
 		style.WindowPadding    = ImVec2(0, 0);
-		style.FramePadding     = ImVec2(12, 6);
+		style.FramePadding     = ImVec2(10, 6);
 		style.ItemSpacing      = ImVec2(10, 6);
 		style.ItemInnerSpacing = ImVec2(8, 4);
-		style.ScrollbarSize    = 8.0f;
+		style.ScrollbarSize    = 10.0f;
 		style.GrabMinSize      = 8.0f;
 		style.WindowBorderSize = 0.0f;
 		style.ChildBorderSize  = 0.0f;
@@ -108,7 +108,7 @@ namespace theme
 		c[ImGuiCol_TableBorderStrong]     = border;
 		c[ImGuiCol_TableBorderLight]      = bg_light;
 		c[ImGuiCol_TableRowBg]            = ImVec4(0, 0, 0, 0);
-		c[ImGuiCol_TableRowBgAlt]         = hex(0xFFFFFF, 0.015f);
+		c[ImGuiCol_TableRowBgAlt]         = hex(0xFFFFFF, 0.03f);
 		c[ImGuiCol_TextSelectedBg]        = accent_dim;
 		c[ImGuiCol_DragDropTarget]        = accent;
 		c[ImGuiCol_NavCursor]             = accent;

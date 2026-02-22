@@ -9,15 +9,6 @@
 class BreakpointsPanel : public IPanel
 {
 public:
-	~BreakpointsPanel() override;
-	void render() override;
-	tab_id get_id() const override { return tab_id::breakpoints; }
-	const char* get_name() const override { return "Breakpoints"; }
-
-	// public API for cross-panel use
-	void add_breakpoint_public(uint64_t va, const char* label) { add_breakpoint(va, label); }
-
-private:
 	struct breakpoint_t
 	{
 		uint64_t virtual_address;
@@ -27,6 +18,20 @@ private:
 		int hit_count = 0;
 	};
 
+	~BreakpointsPanel() override;
+	void render() override;
+	tab_id get_id() const override { return tab_id::breakpoints; }
+	const char* get_name() const override { return "Breakpoints"; }
+
+	// public API for cross-panel use
+	void add_breakpoint_public(uint64_t va, const char* label) { add_breakpoint(va, label); }
+
+	// public API for MCP server
+	void api_remove(uint64_t va);
+	std::vector<breakpoint_t> api_list() const { return m_breakpoints; }
+	std::vector<trap_frame_log_t> api_logs(int limit = 200) const;
+
+private:
 	std::vector<breakpoint_t> m_breakpoints;
 	std::vector<trap_frame_log_t> m_log_entries;
 	float m_last_flush = 0.0f;

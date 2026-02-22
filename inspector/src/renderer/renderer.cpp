@@ -29,6 +29,7 @@ namespace renderer
 	static ImFont* g_font_bold    = nullptr;
 	static ImFont* g_font_title   = nullptr;
 	static ImFont* g_font_mono    = nullptr;
+	static ImFont* g_font_small   = nullptr;
 
 	// borderless window: width of the caption button area (min/max/close)
 	// set by app.cpp so WM_NCHITTEST knows where buttons are
@@ -227,12 +228,14 @@ namespace renderer
 		g_font_regular = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f);
 		g_font_bold    = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 16.0f);
 		g_font_title   = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 22.0f);
-		g_font_mono    = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 14.0f);
+		g_font_mono    = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 15.0f);
+		g_font_small   = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 13.0f);
 
 		if (!g_font_regular) g_font_regular = io.Fonts->AddFontDefault();
 		if (!g_font_bold)    g_font_bold    = g_font_regular;
 		if (!g_font_title)   g_font_title   = g_font_regular;
 		if (!g_font_mono)    g_font_mono    = io.Fonts->AddFontDefault();
+		if (!g_font_small)   g_font_small   = g_font_regular;
 
 		ImGui_ImplWin32_Init(g_hwnd);
 		ImGui_ImplDX11_Init(g_device, g_device_context);
@@ -326,4 +329,5 @@ namespace renderer
 	ImFont* font_bold()    { return g_font_bold; }
 	ImFont* font_title()   { return g_font_title; }
 	ImFont* font_mono()    { return g_font_mono; }
+	ImFont* font_small()   { return g_font_small; }
 }

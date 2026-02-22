@@ -3,6 +3,7 @@
 
 #include "../cr3/cr3.h"
 #include "../cr3/pte.h"
+#include "../cr3/fork_registry.h"
 #include "../slat_def.h"
 #include "../slat.h"
 
@@ -80,7 +81,11 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 		return 0;
 	}
 
+#ifdef _INTELMACHINE
+	slat_pte* const hook_target_pte = fork_get_pte(hook_cr3(), hyperv_cr3(), target_guest_physical_address, 1);
+#else
 	slat_pte* const hook_target_pte = get_pte(hook_cr3(), target_guest_physical_address, 1);
+#endif
 
 	if (hook_target_pte == nullptr)
 	{
@@ -122,6 +127,8 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 	hook_entry->set_next(used_hook_list_head);
 	hook_entry->set_original_pfn(target_pte->page_frame_number);
 	hook_entry->set_paging_split_state(paging_split_state);
+	hook_entry->set_hook_byte_offset(target_guest_physical_address.offset);
+	hook_entry->set_hook_byte_length(0);
 
 	used_hook_list_head = hook_entry;
 
@@ -131,16 +138,18 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 	hook_entry->set_original_execute_access(target_pte->execute_access);
 	hook_entry->set_original_user_mode_execute(target_pte->user_mode_execute);
 
+	// hyperv_cr3: shadow PFN, --X (execute hook code)
 	target_pte->page_frame_number = shadow_page_host_physical_address >> 12;
 	target_pte->execute_access = 1;
 	target_pte->user_mode_execute = 1;
 	target_pte->read_access = 0;
 	target_pte->write_access = 0;
 
+	// hook_cr3: original PFN, R-- (read original, writes trigger MTF)
 	hook_target_pte->execute_access = 0;
 	hook_target_pte->user_mode_execute = 0;
 	hook_target_pte->read_access = 1;
-	hook_target_pte->write_access = 1;
+	hook_target_pte->write_access = 0;
 #else
 	hook_entry->set_original_execute_access(!target_pte->execute_disable);
 

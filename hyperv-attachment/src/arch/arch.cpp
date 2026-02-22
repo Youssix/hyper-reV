@@ -147,6 +147,30 @@ void arch::invalidate_vpid_current()
 	invalidate_vpid_mappings(invvpid_single_context_retaining_globals, descriptor);
 }
 
+std::uint16_t arch::get_current_vpid()
+{
+	return static_cast<std::uint16_t>(vmread(VMCS_CTRL_VIRTUAL_PROCESSOR_IDENTIFIER));
+}
+
+void arch::enable_mtf()
+{
+	std::uint64_t proc_controls = vmread(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS);
+	proc_controls |= IA32_VMX_PROCBASED_CTLS_MONITOR_TRAP_FLAG_FLAG;
+	vmwrite(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, proc_controls);
+}
+
+void arch::disable_mtf()
+{
+	std::uint64_t proc_controls = vmread(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS);
+	proc_controls &= ~static_cast<std::uint64_t>(IA32_VMX_PROCBASED_CTLS_MONITOR_TRAP_FLAG_FLAG);
+	vmwrite(VMCS_CTRL_PROCESSOR_BASED_VM_EXECUTION_CONTROLS, proc_controls);
+}
+
+std::uint8_t arch::is_mtf(const std::uint64_t vmexit_reason)
+{
+	return vmexit_reason == VMX_EXIT_REASON_MONITOR_TRAP_FLAG;
+}
+
 std::uint8_t arch::is_non_maskable_interrupt_exit(const std::uint64_t vmexit_reason)
 {
 #ifdef _INTELMACHINE

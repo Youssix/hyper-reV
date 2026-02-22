@@ -6,6 +6,7 @@
 #include "hypercall/hypercall.h"
 #include "system/system.h"
 #include <portable_executable/image.hpp>
+#include "../widgets/ui_helpers.h"
 #include <cstdio>
 #include <algorithm>
 #include <cstring>
@@ -342,12 +343,12 @@ void ModulesPanel::render()
 					{
 						char buf[32];
 						snprintf(buf, sizeof(buf), "0x%llX", ge.address);
-						ImGui::SetClipboardText(buf);
+						ui::clipboard(buf, "Address copied");
 					}
 					if (ImGui::MenuItem("Copy Module+Offset"))
 					{
 						std::string mod_str = widgets::format_address_short(ge.address);
-						ImGui::SetClipboardText(mod_str.c_str());
+						ui::clipboard(mod_str.c_str(), "Address copied");
 					}
 					ImGui::EndPopup();
 				}
@@ -415,7 +416,7 @@ void ModulesPanel::render()
 				{
 					char buf[32];
 					snprintf(buf, sizeof(buf), "0x%llX", mod.base);
-					ImGui::SetClipboardText(buf);
+					ui::clipboard(buf, "Address copied");
 				}
 				ImGui::EndPopup();
 			}
@@ -476,12 +477,12 @@ void ModulesPanel::render()
 					{
 						char buf[32];
 						snprintf(buf, sizeof(buf), "0x%llX", exp.address);
-						ImGui::SetClipboardText(buf);
+						ui::clipboard(buf, "Address copied");
 					}
 					if (ImGui::MenuItem("Copy Module+Offset"))
 					{
 						std::string mod_str = widgets::format_address_short(exp.address);
-						ImGui::SetClipboardText(mod_str.c_str());
+						ui::clipboard(mod_str.c_str(), "Address copied");
 					}
 					ImGui::EndPopup();
 				}
