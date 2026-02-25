@@ -17,9 +17,7 @@
 #include "slat/violation/mtf_context.h"
 #include "cr3_intercept.h"
 
-#ifndef _INTELMACHINE
 #include <intrin.h>
-#endif
 
 typedef std::uint64_t(*vmexit_handler_t)(std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4);
 
@@ -49,29 +47,22 @@ extern "C" volatile std::uint8_t hook2_initialized = 0;
 
 void process_first_vmexit()
 {
-    static std::uint8_t is_first_vmexit = 1;
+    // Atomic guard: only one core runs init, others skip entirely.
+    static volatile long is_first_vmexit = 1;
 
-    if (is_first_vmexit == 1)
+    if (_InterlockedCompareExchange(&is_first_vmexit, 0, 1) == 1)
     {
         slat::process_first_vmexit();
         interrupts::set_up();
 
         clean_up_uefi_boot_image();
 
-        is_first_vmexit = 0;
+        // Boot-time hidden region — allocate page tables now (doesn't need ntoskrnl).
+        // PML4 entry auto-inserted into clone by sync_page_tables later.
+        // [BISECT] hypercall::setup_hidden_region_boot();
 
         // Signal fast handler that all subsystems are ready
         hook2_initialized = 1;
-    }
-
-    static std::uint8_t has_hidden_heap_pages = 0;
-    static std::uint64_t vmexit_count = 0;
-
-    if (has_hidden_heap_pages == 0 && 10000 <= ++vmexit_count)
-    {
-        // hides heap from Hyper-V slat cr3. when the hook slat cr3 is initialised, the heap must also be hidden from it
-
-        has_hidden_heap_pages = slat::hide_heap_pages(slat::hyperv_cr3());
     }
 }
 
@@ -81,26 +72,76 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
     // Hook 2 runs for ALL VMEXITs (VTL 0 + VTL 1). Init must run regardless of VTL.
     process_first_vmexit();
 
+    // Deferred MmClean cleanup: pick up flag set by CPUID(22) on previous VMEXIT.
+    // Hook 1 also checks this, but only for its 5 filtered exit types.
+    // Hook 2 covers all other VMEXITs (EXTERNAL_INTERRUPT, etc.).
+    if (cr3_intercept::cleanup_hook::cleanup_pending)
+    {
+        if (_InterlockedExchange8(
+            reinterpret_cast<volatile char*>(&cr3_intercept::cleanup_hook::cleanup_pending), 0))
+        {
+            const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+            hypercall::perform_process_cleanup();
+            return result;
+        }
+    }
+
+    const cr3 hk_cr3 = slat::hook_cr3();
+
+    // Fix C: Fast path — no hooks active, skip all EPTP logic
+    if (hk_cr3.flags == 0)
+    {
+        const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+
+        return result;
+    }
+
     // With VSM, VTL 1 VMEXITs go through the same handler but have a different VMCS/EPTP.
     // Only swap EPTP for VTL 0 VMEXITs where we're on our hook_cr3.
     // VTL 1 and hyperv_cr3 contexts pass through untouched.
     const cr3 current_eptp = arch::get_slat_cr3();
-    const cr3 hk_cr3 = slat::hook_cr3();
 
-    const bool on_hook_cr3 = hk_cr3.flags != 0 &&
+    const bool on_hook_cr3 =
         current_eptp.address_of_page_directory == hk_cr3.address_of_page_directory;
 
     if (on_hook_cr3)
     {
-        // Swap to Hyper-V's EPTP so its handler sees clean page tables.
-        // Preserve EPTP metadata bits [11:0] from current VMCS — only change PML4 address.
-        cr3 hyperv_eptp = current_eptp;
-        hyperv_eptp.address_of_page_directory = slat::hyperv_cr3().address_of_page_directory;
-        arch::set_slat_cr3(hyperv_eptp);
-
+        // [BISECT STEP 15] Pure passthrough — identical to step 7 which WORKED.
+        // NO swap before, NO restore after, NO guard. Just call and return.
+        // If HV's handler overwrites EPTP to hyperv_cr3, VP falls off hook_cr3.
+        // Re-bootstrap in bottom path (hook_cr3_ready) brings it back next VMEXIT.
         const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
 
-        // Check if violation handler queued a fork sync for this LP
+        // Per-VMEXIT CR3 swap (ring-1 style): catch context switches after HV handler.
+        if (cr3_intercept::enabled)
+        {
+            const cr3 guest_cr3 = arch::get_guest_cr3();
+            const std::uint64_t guest_pfn = guest_cr3.flags & cr3_intercept::cr3_pfn_mask;
+            const std::uint64_t clone_pfn = cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask;
+
+            if (guest_pfn != clone_pfn)
+            {
+                const std::uint64_t target_pfn = cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask;
+
+                if (guest_pfn == target_pfn ||
+                    (cr3_intercept::target_user_cr3 != 0 &&
+                     guest_pfn == (cr3_intercept::target_user_cr3 & cr3_intercept::cr3_pfn_mask)))
+                {
+                    arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
+                    cr3_intercept::cr3_swap_count++;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+
+    // Fork sync: if Hook 1's violation handler queued a fork sync (unhandled EPT
+    // violation in forked region), do the sync now. Don't write hook_cr3 to VMCS here —
+    // Hook 1 re-bootstraps on next VMEXIT (writing EPTP after HV handler = crash).
+    {
         const std::uint16_t vpid = arch::get_current_vpid();
 
         if (vpid < slat::mtf::max_contexts && slat::violation::fork_sync_pending_gpa[vpid] != 0)
@@ -109,32 +150,29 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
             slat::violation::fork_sync_pending_gpa[vpid] = 0;
         }
 
-        // Restore hook EPTP after Hyper-V's handler returns.
-        // Read fresh metadata in case Hyper-V modified any EPTP bits during handling.
-        cr3 restored_eptp = arch::get_slat_cr3();
-        restored_eptp.address_of_page_directory = hk_cr3.address_of_page_directory;
-        arch::set_slat_cr3(restored_eptp);
-
-        return result;
+        // [REMOVED] re-bootstrap from Hook 2 — writing hook_cr3 to VMCS AFTER HV's handler
+        // causes CLOCK_WATCHDOG / KERNEL_MODE_TRAP (bisect steps 9-14).
+        // Re-bootstrap is now in Hook 1 (vmexit_entry.cpp), BEFORE HV's handler.
     }
 
-    const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
-
-    // Check fork sync even when not on hook_cr3 — Hook 1 may have swapped EPTP
-    // to hyperv_cr3 before falling through (e.g., unhandled EPT violation in forked region)
-    if (hk_cr3.flags != 0)
+    // Per-VMEXIT CR3 swap — same as on_hook_cr3 path above.
+    if (cr3_intercept::enabled && slat::is_our_eptp(current_eptp))
     {
-        const std::uint16_t vpid = arch::get_current_vpid();
+        const cr3 guest_cr3 = arch::get_guest_cr3();
+        const std::uint64_t guest_pfn = guest_cr3.flags & cr3_intercept::cr3_pfn_mask;
+        const std::uint64_t clone_pfn = cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask;
 
-        if (vpid < slat::mtf::max_contexts && slat::violation::fork_sync_pending_gpa[vpid] != 0)
+        if (guest_pfn != clone_pfn)
         {
-            slat::fork_registry::sync_forked_entry(slat::violation::fork_sync_pending_gpa[vpid]);
-            slat::violation::fork_sync_pending_gpa[vpid] = 0;
+            const std::uint64_t target_pfn = cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask;
 
-            // Restore hook_cr3 EPTP since we were on it before Hook 1 swapped away
-            cr3 restored_eptp = arch::get_slat_cr3();
-            restored_eptp.address_of_page_directory = hk_cr3.address_of_page_directory;
-            arch::set_slat_cr3(restored_eptp);
+            if (guest_pfn == target_pfn ||
+                (cr3_intercept::target_user_cr3 != 0 &&
+                 guest_pfn == (cr3_intercept::target_user_cr3 & cr3_intercept::cr3_pfn_mask)))
+            {
+                arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
+                cr3_intercept::cr3_swap_count++;
+            }
         }
     }
 

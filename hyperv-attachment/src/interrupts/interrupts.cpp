@@ -101,14 +101,8 @@ void interrupts::process_nmi()
     {
         slat::flush_current_logical_processor_cache();
 
-        if (cr3_intercept::enabled)
-        {
-            arch::enable_cr3_exiting();
-        }
-        else
-        {
-            arch::disable_cr3_exiting();
-        }
+        // NOTE: enable_cr3_exiting() REMOVED permanently.
+        // Writing proc-based controls triggers HyperGuard. See vmexit_entry.cpp.
 
         clear_nmi_ready(current_apic_id);
     }

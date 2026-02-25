@@ -40,6 +40,11 @@ std::uint64_t arch::get_guest_physical_address()
 	return vmread(VMCS_GUEST_PHYSICAL_ADDRESS);
 }
 
+std::uint64_t arch::get_guest_linear_address()
+{
+	return vmread(VMCS_EXIT_GUEST_LINEAR_ADDRESS);
+}
+
 #else
 std::uint8_t get_vmcb_routine_bytes[27];
 
@@ -171,6 +176,27 @@ std::uint8_t arch::is_mtf(const std::uint64_t vmexit_reason)
 	return vmexit_reason == VMX_EXIT_REASON_MONITOR_TRAP_FLAG;
 }
 
+void arch::adjust_tsc_offset(const std::int64_t delta)
+{
+	const std::int64_t current = static_cast<std::int64_t>(vmread(VMCS_CTRL_TSC_OFFSET));
+	vmwrite(VMCS_CTRL_TSC_OFFSET, static_cast<std::uint64_t>(current + delta));
+}
+
+void arch::inject_exception(const std::uint8_t vector)
+{
+	vmentry_interrupt_information info = {};
+	info.vector = vector;
+	info.interruption_type = static_cast<std::uint32_t>(interruption_type::hardware_exception);
+	info.deliver_error_code = 0;
+	info.valid = 1;
+	vmwrite(VMCS_CTRL_VMENTRY_INTERRUPTION_INFORMATION_FIELD, info.flags);
+}
+
+std::uint64_t arch::get_virtual_apic_address()
+{
+	return vmread(VMCS_CTRL_VIRTUAL_APIC_ADDRESS);
+}
+
 std::uint8_t arch::is_non_maskable_interrupt_exit(const std::uint64_t vmexit_reason)
 {
 #ifdef _INTELMACHINE
@@ -271,6 +297,16 @@ std::uint64_t arch::get_guest_rip()
 	const vmcb_t* const vmcb = get_vmcb();
 
 	return vmcb->save_state.rip;
+#endif
+}
+
+std::uint64_t arch::get_guest_idtr_base()
+{
+#ifdef _INTELMACHINE
+	return vmread(VMCS_GUEST_IDTR_BASE);
+#else
+	const vmcb_t* const vmcb = get_vmcb();
+	return vmcb->save_state.idtr.base;
 #endif
 }
 

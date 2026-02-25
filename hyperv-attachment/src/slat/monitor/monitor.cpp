@@ -53,7 +53,11 @@ std::uint64_t slat::monitor::add(const virtual_address_t guest_physical_address)
 
 	std::uint8_t paging_split_state = 0;
 
-	slat_pte* const target_pte = get_pte(hyperv_cr3(), guest_physical_address, 1, &paging_split_state);
+#ifdef _INTELMACHINE
+	slat_pte* const target_pte = fork_get_pte(hook_cr3(), hyperv_cr3(), guest_physical_address, 1, &paging_split_state);
+#else
+	slat_pte* const target_pte = get_pte(hook_cr3(), guest_physical_address, 1, &paging_split_state);
+#endif
 
 	if (target_pte == nullptr)
 	{
@@ -114,7 +118,7 @@ std::uint64_t slat::monitor::remove(const virtual_address_t guest_physical_addre
 		return 0;
 	}
 
-	slat_pte* const target_pte = get_pte(hyperv_cr3(), guest_physical_address);
+	slat_pte* const target_pte = get_pte(hook_cr3(), guest_physical_address);
 
 	if (target_pte == nullptr)
 	{

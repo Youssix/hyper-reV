@@ -88,6 +88,12 @@ namespace sys
 		// NtClose RVA (resolved from PDB, for syscall hijack EPT hook)
 		inline std::uint64_t nt_close_rva = 0;
 
+		// MmCleanProcessAddressSpace RVA (resolved from PDB, for process death cleanup hook)
+		inline std::uint64_t mm_clean_process_address_space_rva = 0;
+
+		// PsWatchWorkingSet RVA (resolved from PDB, for working set monitoring suppression hook)
+		inline std::uint64_t ps_watch_working_set_rva = 0;
+
 		// KiSystemCall64 service exit instrumentation callback hook point (pattern scan)
 		// Hooks "mov r10, [rbp+disp]" to bypass InstrumentationCallback for hidden memory syscalls
 		inline std::uint64_t ki_system_call64_service_exit_rva = 0;
@@ -104,6 +110,13 @@ namespace sys
 		inline std::uint64_t ktrap_frame_rdx = 0;
 		inline std::uint64_t ktrap_frame_r8  = 0;
 		inline std::uint64_t ktrap_frame_r9  = 0;
+		inline std::uint64_t ktrap_frame_r10 = 0;
+
+		// KiDispatchException RVA (resolved from PDB, for safe memory probe EPT hook)
+		inline std::uint64_t ki_dispatch_exception_rva = 0;
+
+		// KiPageFault RVA (resolved from PDB, for inline #PF handler EPT hook)
+		inline std::uint64_t ki_page_fault_rva = 0;
 	}
 
 	struct thread_info_t {

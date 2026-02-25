@@ -63,7 +63,7 @@ void cleanup_before_exit()
 {
 	stop_watchdog();
 
-	if (inject::mmaf_hook_va != 0 || inject::ksse_hook_va != 0 || inject::target_pid != 0)
+	if (inject::ksse_hook_va != 0 || inject::target_pid != 0)
 	{
 		std::println("\n[*] Auto-cleaning injection hooks before exit...");
 		inject::uninject();

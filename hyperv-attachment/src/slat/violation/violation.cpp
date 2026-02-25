@@ -57,7 +57,7 @@ std::uint8_t slat::violation::process()
 
 			// Restore read access so the operation can proceed
 			virtual_address_t gpa = { .address = physical_address };
-			slat_pte* const target_pte = get_pte(hyperv_cr3(), gpa);
+			slat_pte* const target_pte = get_pte(hook_cr3(), gpa);
 
 			if (target_pte != nullptr)
 			{
@@ -105,76 +105,47 @@ std::uint8_t slat::violation::process()
 
 	if (qualification.execute_access)
 	{
-		set_cr3(hyperv_cr3());
-
-		// page is now --x, and with shadow pfn
-
-		// Usermode EPT hooks: the shadow page JMPs to a detour in hidden memory
-		// (PML4[reserved_index]), which only exists in the clone CR3.
-		// If the game thread is under the original CR3, the JMP would #PF.
-		// MmAccessFault can't fix this because KPTI overwrites our CR3 swap
-		// on the return-to-user path (MOV CR3, user_dtb happens AFTER MmAccessFault
-		// returns but BEFORE IRETQ), causing an infinite #PF loop -> bugcheck 0x139.
-		// Fix: swap guest CR3 to clone here in VMX root, before VMRESUME.
-		if (cr3_intercept::enabled)
-		{
-			if (cr3_intercept::find_usermode_ept_hook((physical_address >> 12) << 12) != nullptr)
-			{
-				const cr3 guest_cr3 = arch::get_guest_cr3();
-				const std::uint64_t guest_pfn = guest_cr3.flags & cr3_intercept::cr3_pfn_mask;
-
-				const bool is_original = guest_pfn == (cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask);
-				const bool is_user_dtb = cr3_intercept::target_user_cr3 != 0
-					&& guest_pfn == (cr3_intercept::target_user_cr3 & cr3_intercept::cr3_pfn_mask);
-
-				if (is_original || is_user_dtb)
-				{
-					arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
-					arch::invalidate_vpid_current();
-				}
-			}
-		}
+		// New scheme: hook_cr3 has shadow PFN --X, so execute violations on hooked
+		// pages should not occur. Defensive fallback — flush and let retry.
+		flush_current_logical_processor_cache();
 	}
 	else if (qualification.write_access)
 	{
-		// Write to hooked page on hook_cr3 (R-- permission)
-		// Grant temp RW, arm MTF to restore R-- and sync shadow after one instruction
+		// Write to hooked page on hook_cr3 (shadow --X, no W).
+		// Swap to hyperv_cr3 where original page has RWX (2MB identity, untouched).
+		set_cr3(hyperv_cr3());
+
 		const std::uint16_t vpid = arch::get_current_vpid();
 
 		if (vpid >= mtf::max_contexts)
 		{
-			// Cannot arm MTF for this VPID — fall through to Hyper-V
-			set_cr3(hyperv_cr3());
+			// Cannot arm MTF — fall through on hyperv_cr3
 			return 0;
 		}
 
-		const virtual_address_t gpa = { .address = physical_address };
-
-		slat_pte* const hook_pte = get_pte(hook_cr3(), gpa);
-
-		if (hook_pte != nullptr)
-		{
-			const std::uint64_t saved_flags = hook_pte->flags;
-
-			// Grant temporary write access
-			hook_pte->read_access = 1;
-			hook_pte->write_access = 1;
-
-			// Arm MTF context for this LP
-			mtf::arm(vpid, physical_address, hook_pte, saved_flags);
-
-			// Enable monitor trap flag — fires after next guest instruction
-			arch::enable_mtf();
-
-			// Flush EPT cache so the temp permission takes effect
-			flush_current_logical_processor_cache();
-		}
+		// Arm MTF: after 1 instruction (the write), sync shadow and swap back
+		mtf::arm(vpid, physical_address, nullptr, 0, 1);
+		arch::enable_mtf();
+		flush_current_logical_processor_cache();
 	}
 	else
 	{
-		set_cr3(hook_cr3());
+		// Read on hooked page on hook_cr3 (shadow --X, no R).
+		// Swap to hyperv_cr3 where original page has RWX (shows clean original data).
+		set_cr3(hyperv_cr3());
 
-		// page is now r--, and with original pfn
+		const std::uint16_t vpid = arch::get_current_vpid();
+
+		if (vpid >= mtf::max_contexts)
+		{
+			// Cannot arm MTF — fall through on hyperv_cr3
+			return 0;
+		}
+
+		// Arm MTF: after 1 instruction (the read), swap back (no sync needed)
+		mtf::arm(vpid, physical_address, nullptr, 0, 0);
+		arch::enable_mtf();
+		flush_current_logical_processor_cache();
 	}
 #else
 	const vmcb_t* const vmcb = arch::get_vmcb();

@@ -12,11 +12,12 @@ namespace slat::mtf
 		slat_pte* hook_pte;
 		std::uint64_t saved_pte_flags;
 		std::uint8_t active;
+		std::uint8_t is_write;
 	};
 
 	void set_up();
 
-	void arm(std::uint16_t vpid, std::uint64_t gpa, slat_pte* hook_pte, std::uint64_t saved_flags);
+	void arm(std::uint16_t vpid, std::uint64_t gpa, slat_pte* hook_pte, std::uint64_t saved_flags, std::uint8_t is_write = 0);
 
 	// Returns 1 if this was our MTF, 0 if not
 	std::uint8_t process();

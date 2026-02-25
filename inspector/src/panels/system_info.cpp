@@ -36,7 +36,6 @@ void SystemInfoPanel::render()
 		info_row("CR3 Exit Count", "%llu", hypercall::read_cr3_exit_count());
 		info_row("CR3 Swap Count", "%llu", hypercall::read_cr3_swap_count());
 		info_row("SLAT Violations", "%llu", hypercall::read_slat_violation_count());
-		info_row("MMAF Hits", "%llu", hypercall::read_mmaf_hit_count());
 		info_row("Hijack CPUID Count", "%llu", hypercall::read_hijack_cpuid_count());
 		info_row("Hijack Armed", "%llu", hypercall::read_hijack_armed_state());
 	}

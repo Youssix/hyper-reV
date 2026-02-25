@@ -25,8 +25,8 @@ enum class hypercall_type_t : std::uint64_t
 #pragma warning(push)
 #pragma warning(disable: 4201)
 
-constexpr std::uint64_t hypercall_primary_key = 0x4E47;
-constexpr std::uint64_t hypercall_secondary_key = 0x7F;
+constexpr std::uint64_t hypercall_primary_key = 0xA3D8;
+constexpr std::uint64_t hypercall_secondary_key = 0x53;
 
 union hypercall_info_t
 {
@@ -53,6 +53,18 @@ union virt_memory_op_hypercall_info_t
         memory_operation_t memory_operation : 1;
         std::uint64_t address_of_page_directory : 36; // we will construct the other cr3 (aside from the caller process) involved in the operation from this
     };
+};
+
+// Sig scan request — passed by guest VA pointer to hypervisor
+struct sig_scan_request_t
+{
+    std::uint64_t scan_base_va;    // start of scan region (e.g. ntoskrnl base)
+    std::uint64_t scan_size;       // size of scan region
+    std::uint32_t pattern_len;     // length of pattern/mask (max 64)
+    std::uint8_t resolve_call;     // 1 = match is E8 CALL site, resolve target VA
+    std::uint8_t _pad[3];
+    std::uint8_t pattern[64];      // byte pattern
+    char mask[64];                 // 'x' = must match, '?' = wildcard
 };
 
 #pragma warning(pop)

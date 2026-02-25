@@ -308,7 +308,7 @@ std::uint8_t slat::is_pte_large(const void* const pte_in)
 	return large_pte->large_page;
 }
 
-slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, const virtual_address_t gpa, const std::uint8_t force_split)
+slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, const virtual_address_t gpa, const std::uint8_t force_split, std::uint8_t* const paging_split_state)
 {
 #ifdef _INTELMACHINE
 	// Walk hook_cr3 PML4
@@ -365,18 +365,6 @@ slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, c
 			return nullptr;
 		}
 
-		// Also split in hyperv_cr3 to keep structure consistent
-		slat_pdpte* const hyperv_pdpte = get_pdpte(hyperv_pml4e, gpa);
-
-		if (hyperv_pdpte != nullptr)
-		{
-			auto hyperv_large_pdpte = reinterpret_cast<slat_pdpte_1gb*>(hyperv_pdpte);
-
-			if (hyperv_large_pdpte->large_page == 1)
-			{
-				split_1gb_pdpte(hyperv_large_pdpte);
-			}
-		}
 	}
 
 	// Compare PD PFN with hyperv_cr3's PDPT entry
@@ -418,10 +406,15 @@ slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, c
 		{
 			return nullptr;
 		}
+
+		if (paging_split_state != nullptr)
+		{
+			*paging_split_state = 1;
+		}
 	}
 
-	// Compare PT PFN with hyperv_cr3's PD entry
-	const slat_pde* const hyperv_pde = get_pde(hyperv_cr3_val, gpa, force_split);
+	// Compare PT PFN with hyperv_cr3's PD entry (read-only walk, never force-split)
+	const slat_pde* const hyperv_pde = get_pde(hyperv_cr3_val, gpa, 0);
 
 	if (hyperv_pde != nullptr && hook_pde->page_frame_number == hyperv_pde->page_frame_number)
 	{

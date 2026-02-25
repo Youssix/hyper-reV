@@ -12,19 +12,17 @@ namespace cr3_intercept
 	constexpr std::uint64_t cr3_pfn_mask = 0xFFFFFFFFF000ull;
 
 	inline std::uint8_t enabled = 0;
-	inline std::uint8_t enforce_active = 0; // when set, force clone CR3 at every VM exit
 	inline std::uint64_t cr3_exit_count = 0;
 	inline std::uint64_t cr3_swap_count = 0;
 	inline std::uint64_t cr3_last_seen = 0;
-	inline std::uint64_t mmaf_hit_count = 0; // incremented each time write_guest_cr3 hypercall fires (from MmAccessFault hook)
 	inline std::uint64_t slat_violation_count = 0; // total EPT violations entering violation::process()
+	inline std::uint64_t mmaf_hit_count = 0; // incremented each time write_guest_cr3 hypercall fires (from MmAccessFault hook)
 	inline std::uint64_t target_original_cr3 = 0;
 	inline std::uint64_t cloned_cr3_value = 0;
 	inline void* cloned_pml4_host_va = nullptr;
 	inline std::uint64_t reserved_pml4e_index = 0;
 	inline void* hidden_pt_host_va = nullptr;
 	inline std::uint64_t target_user_cr3 = 0; // UserDirectoryTableBase value
-	inline std::uint64_t user_pml4e_backup = 0; // original UserDTB PML4[reserved_index] for restoration
 
 	// Shadow registry — tracks cloned intermediate pages and shadow leaves
 	struct shadow_pdpt_t {
@@ -159,6 +157,102 @@ namespace cr3_intercept
 	inline std::uint64_t diag_watch_pfn = 0; // PFN to watch (0 = disabled)
 	inline std::uint64_t diag_watch_pfn_exec_count = 0; // execute violations on watched PFN
 	inline std::uint64_t diag_watch_pfn_rw_count = 0; // read/write violations on watched PFN
+
+	// Screenshot hook state — anti-cheat GDI blit interception
+	namespace screenshot_hook
+	{
+		inline volatile std::uint8_t enabled = 0;      // feature on/off
+		inline volatile std::uint8_t blt_active = 0;   // screenshot in progress
+		inline volatile std::uint8_t blt_ack = 0;      // DLL acknowledged (overlay hidden)
+		inline volatile std::uint64_t blt_start_tsc = 0; // TSC at blt_start for timeout
+	}
+
+	// Process death auto-cleanup — MmCleanProcessAddressSpace hook state
+	namespace cleanup_hook
+	{
+		inline volatile std::uint64_t target_eprocess = 0;
+		inline volatile std::uint8_t armed = 0;
+		inline volatile std::uint64_t cleanup_performed_count = 0;
+		inline volatile std::uint8_t cleanup_pending = 0;
+		inline volatile std::uint64_t hook_entry_count = 0;     // unconditional: hook code entered (any process)
+		inline volatile std::uint64_t hook_hit_count = 0;       // armed path: fn_PsGetProcessImageFileName resolved
+		inline volatile std::uint64_t hook_match_count = 0;     // name matches (cleanup triggered)
+
+		// Name-based targeting (ring-1 style) — survives process restart
+		inline char target_process_name[16] = {};
+		inline std::uint64_t fn_PsGetProcessImageFileName = 0;  // resolved via PE export walk
+		inline std::uint64_t ntoskrnl_base = 0;                 // set by hypercall 23
+	}
+
+	// Anti-recursion flag — ring-1 g_ExecutingEPTHook equivalent
+	// Set to 1 when ANY compiled EPT hook function is executing in guest context.
+	// Other hooks check this to avoid infinite recursion if hooked code calls another hooked function.
+	inline volatile std::uint8_t g_executing_ept_hook = 0;
+
+	// Generic EPT hook context — ring-1 HOOK_CONTEXT equivalent
+	// Reusable for any inline EPT hook: MmClean, KiPageFault, KiDispatchException, etc.
+	struct ept_hook_context_t
+	{
+		bool active = false;
+		std::uint64_t target_va = 0;                           // guest VA of hooked function (pOriginalFunction)
+		std::uint64_t target_pa_page = 0;                      // PA page for EPT removal
+		void* shadow_heap_va = nullptr;                        // shadow page heap allocation
+		std::uint64_t trampoline_va = 0;                       // guest VA of trampoline (calls original)
+		std::uint64_t trampoline_hidden_slot = 0xFFFF;         // hidden PT slot for trampoline page
+	};
+
+	// Attachment image mapping into hidden region — makes compiled C++ code guest-executable
+	namespace attachment_mapping
+	{
+		inline std::uint64_t image_base_pa = 0;     // attachment PE image base PA
+		inline std::uint32_t image_page_count = 0;  // number of pages mapped
+		inline std::uint64_t hidden_base_va = 0;    // VA of image base in hidden region
+		inline bool mapped = false;
+	}
+
+	// MmCleanProcessAddressSpace inline EPT hook
+	namespace mmclean_hook
+	{
+		inline ept_hook_context_t ctx;
+	}
+
+	// MmAccessFault compiled C++ EPT hook — safety net for hidden memory #PFs
+	namespace mmaf_hook
+	{
+		inline ept_hook_context_t ctx;
+		inline volatile std::uint64_t clone_cr3_value = 0;       // written by setup, read by guest hook
+		inline volatile std::uint8_t hidden_pml4_index = 0;      // PML4 index of hidden region
+		inline volatile std::uint64_t hit_count = 0;             // diagnostic: how many hidden memory faults caught
+	}
+
+	// KiDispatchException EPT hook — safe memory probes
+	namespace exception_handler
+	{
+		inline bool active = false;
+		inline std::uint64_t ki_dispatch_exception_va = 0;
+		inline std::uint64_t trampoline_va = 0;
+		inline std::uint64_t suppress_ret_va = 0;
+		inline void* shadow_heap_va = nullptr;
+		inline std::uint64_t target_pa_page = 0;
+		inline std::uint32_t ktf_rax_offset = 0x30;
+		inline std::uint32_t ktf_r10_offset = 0x58;
+		inline std::uint32_t ktf_rip_offset = 0x168;
+		inline std::uint64_t probe_copy_va = 0;   // TryCopyQword stub VA in hidden memory
+		inline std::uint64_t probe_write_va = 0;   // TryWriteQword stub VA in hidden memory
+		inline void* trampoline_shadow_heap_va = nullptr;  // separate trampoline page (null if on KDE page)
+		inline std::uint64_t trampoline_pa_page = 0;       // PA page of separate trampoline (for EPT hook removal)
+	}
+
+	// KiPageFault inline EPT hook — safety net for hidden memory #PFs
+	namespace page_fault_hook
+	{
+		inline bool active = false;
+		inline std::uint64_t ki_page_fault_va = 0;
+		inline void* shadow_heap_va = nullptr;
+		inline std::uint64_t target_pa_page = 0;
+		inline void* trampoline_shadow_heap_va = nullptr;
+		inline std::uint64_t trampoline_pa_page = 0;
+	}
 
 	inline void sync_page_tables(const std::uint64_t new_original_cr3_value)
 	{

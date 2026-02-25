@@ -91,6 +91,26 @@ void slat::hook::entry_t::set_hook_byte_length(const std::uint64_t length)
 	hook_byte_length_ = length;
 }
 
+std::uint64_t slat::hook::entry_t::hook_byte_offset2() const
+{
+	return hook_byte_offset2_;
+}
+
+std::uint64_t slat::hook::entry_t::hook_byte_length2() const
+{
+	return hook_byte_length2_;
+}
+
+void slat::hook::entry_t::set_hook_byte_offset2(const std::uint64_t offset)
+{
+	hook_byte_offset2_ = offset;
+}
+
+void slat::hook::entry_t::set_hook_byte_length2(const std::uint64_t length)
+{
+	hook_byte_length2_ = length;
+}
+
 slat::hook::entry_t* slat::hook::entry_t::find(const std::uint64_t target_original_4kb_pfn, entry_t** const previous_entry_out)
 {
 	entry_t* current_entry = used_hook_list_head;

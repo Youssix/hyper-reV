@@ -225,6 +225,7 @@
     <MASM Include="src\slat\cr3\intel_invept.asm" />
     <MASM Include="src\arch\intel_invvpid.asm" />
     <MASM Include="src\arch\vmexit_entry_stub.asm" />
+    <MASM Include="src\crt\memset.asm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

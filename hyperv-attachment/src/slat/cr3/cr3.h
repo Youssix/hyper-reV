@@ -19,4 +19,16 @@ namespace slat
 
 	void set_up_hyperv_cr3();
 	void set_up_hook_cr3();
+
+	// ring-1 style: update saved hyperv EPTP if Hyper-V changed it (VTL transition, etc.)
+	void update_hyperv_cr3(cr3 new_eptp);
+
+	// True after set_up_hook_cr3() fully completes (PML4 copied, heap hidden).
+	// Hook 2 must check this before bootstrapping VPs to hook_cr3.
+	bool is_hook_cr3_ready();
+
+	// Sync PML4 entries from hyperv_cr3 to hook_cr3.
+	// Must be called after Hyper-V's handler modifies EPT while on hyperv_cr3,
+	// before restoring hook_cr3 as the active EPTP.
+	void sync_hook_pml4_from_hyperv();
 } 

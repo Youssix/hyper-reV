@@ -1,4 +1,5 @@
 #include "hypercall.h"
+#include "../system/system.h"
 #include <hypercall/hypercall_def.h>
 
 extern "C" std::uint64_t launch_raw_hypercall(hypercall_info_t rcx, std::uint64_t rdx, std::uint64_t r8, std::uint64_t r9);
@@ -104,9 +105,7 @@ std::uint64_t hypercall::read_cr3_last_seen()
 
 std::uint64_t hypercall::write_guest_cr3(std::uint64_t new_cr3)
 {
-	hypercall_type_t call_type = hypercall_type_t::write_guest_cr3;
-
-	return make_hypercall(call_type, 0, new_cr3, 0, 0);
+	return make_hypercall(hypercall_type_t::write_guest_cr3, 0, new_cr3, 0, 0);
 }
 
 std::uint64_t hypercall::clone_guest_cr3(std::uint64_t target_cr3)
@@ -148,21 +147,6 @@ std::uint64_t hypercall::disable_cr3_intercept()
 	hypercall_type_t call_type = hypercall_type_t::disable_cr3_intercept;
 
 	return make_hypercall(call_type, 0, 0, 0, 0);
-}
-
-std::uint64_t hypercall::enable_cr3_enforce()
-{
-	return make_hypercall(hypercall_type_t::read_guest_cr3, 4, 0, 0, 0);
-}
-
-std::uint64_t hypercall::disable_cr3_enforce()
-{
-	return make_hypercall(hypercall_type_t::read_guest_cr3, 5, 0, 0, 0);
-}
-
-std::uint64_t hypercall::read_mmaf_hit_count()
-{
-	return make_hypercall(hypercall_type_t::read_guest_cr3, 6, 0, 0, 0);
 }
 
 std::uint64_t hypercall::read_slat_violation_count()
@@ -272,4 +256,116 @@ std::uint64_t hypercall::get_heap_free_page_count()
 	hypercall_type_t call_type = hypercall_type_t::get_heap_free_page_count;
 
 	return make_hypercall(call_type, 0, 0, 0, 0);
+}
+
+std::uint64_t hypercall::arm_process_cleanup(std::uint64_t target_eprocess,
+                                              std::uint64_t ntoskrnl_base,
+                                              const char* process_name)
+{
+	// R8 = ntoskrnl base (hypervisor resolves PsGetProcessImageFileName via PE export walk)
+	// R9 = guest VA of name string on stack
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 23,
+	                      target_eprocess,
+	                      ntoskrnl_base,
+	                      reinterpret_cast<std::uint64_t>(process_name));
+}
+
+std::uint64_t hypercall::read_cleanup_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 28, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_boot_hook_diag(std::uint64_t field)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 35, field, 0, 0);
+}
+
+std::uint64_t hypercall::setup_exception_handler(std::uint64_t ki_dispatch_exception_va,
+                                                  std::uint32_t displaced_byte_count)
+{
+	// Pack offsets: (displaced_count & 0xFF) | (ktf_r10_offset << 8) | (ktf_rax_offset << 24)
+	const std::uint32_t ktf_r10 = static_cast<std::uint32_t>(sys::offsets::ktrap_frame_r10);
+	const std::uint32_t ktf_rax = static_cast<std::uint32_t>(sys::offsets::ktrap_frame_rax);
+	const std::uint64_t packed_offsets = (displaced_byte_count & 0xFF)
+		| (static_cast<std::uint64_t>(ktf_r10) << 8)
+		| (static_cast<std::uint64_t>(ktf_rax) << 24);
+
+	// Direct hypercall (reserved_data=24): RDX = full kde_va, R8 = packed_offsets
+	// Avoids relay encoding which truncates kernel VAs (top byte lost by va<<8)
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 24, ki_dispatch_exception_va, packed_offsets, 0);
+}
+
+std::uint64_t hypercall::store_probe_stub_vas(std::uint64_t copy_va, std::uint64_t write_va)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 25, copy_va, write_va, 0);
+}
+
+std::uint64_t hypercall::setup_ki_page_fault_hook(std::uint64_t ki_page_fault_va,
+                                                   std::uint32_t displaced_byte_count,
+                                                   std::uint8_t hidden_pml4_index)
+{
+	// Pack: bits [7:0] = hidden_pml4_index, bits [15:8] = displaced_byte_count
+	const std::uint64_t packed_args = (hidden_pml4_index & 0xFF)
+		| (static_cast<std::uint64_t>(displaced_byte_count & 0xFF) << 8);
+
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 26, ki_page_fault_va, packed_args, 0);
+}
+
+std::uint64_t hypercall::read_idt_handler(std::uint8_t vector)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 27, vector, 0, 0);
+}
+
+std::uint64_t hypercall::setup_mmclean_inline_hook(std::uint64_t mmclean_va,
+                                                    std::uint64_t target_eprocess,
+                                                    std::uint32_t displaced_byte_count)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 29, mmclean_va, target_eprocess, displaced_byte_count);
+}
+
+std::uint64_t hypercall::remove_mmclean_inline_hook()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 31, 0, 0, 0);
+}
+
+std::uint64_t hypercall::setup_mmaf_inline_hook(std::uint64_t mmaf_va,
+                                                 std::uint64_t clone_cr3,
+                                                 std::uint32_t displaced_byte_count,
+                                                 std::uint8_t hidden_pml4_index)
+{
+	// Pack: bits [15:0] = displaced_byte_count, bits [23:16] = hidden_pml4_index
+	const std::uint64_t packed = (displaced_byte_count & 0xFFFF)
+		| (static_cast<std::uint64_t>(hidden_pml4_index) << 16);
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 36, mmaf_va, clone_cr3, packed);
+}
+
+std::uint64_t hypercall::sig_scan_kernel(std::uint64_t scan_base, std::uint64_t scan_size,
+                                          const std::uint8_t* pattern, const char* mask,
+                                          std::uint32_t pattern_len, bool resolve_call)
+{
+	sig_scan_request_t request{};
+	request.scan_base_va = scan_base;
+	request.scan_size = scan_size;
+	request.pattern_len = pattern_len;
+	request.resolve_call = resolve_call ? 1 : 0;
+	memcpy(request.pattern, pattern, pattern_len);
+	memcpy(request.mask, mask, pattern_len);
+
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 33,
+		reinterpret_cast<std::uint64_t>(&request), 0, 0);
+}
+
+std::uint64_t hypercall::read_mmaf_hit_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 6, 0, 0, 0);
+}
+
+std::uint64_t hypercall::screenshot_enable()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 30, 4, 0, 0);
+}
+
+std::uint64_t hypercall::screenshot_disable()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 30, 5, 0, 0);
 }

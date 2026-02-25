@@ -82,7 +82,7 @@ namespace backend
 			s_worker.join();
 
 		// cleanup injection hooks before exiting
-		if (inject::mmaf_hook_va != 0 || inject::ksse_hook_va != 0 || inject::target_pid != 0)
+		if (inject::ksse_hook_va != 0 || inject::target_pid != 0)
 			inject::uninject();
 
 		sys::clean_up();

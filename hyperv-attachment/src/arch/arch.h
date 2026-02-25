@@ -29,6 +29,8 @@ namespace arch
 	std::uint64_t get_guest_rip();
 	void set_guest_rip(std::uint64_t guest_rip);
 
+	std::uint64_t get_guest_idtr_base();
+
 	void advance_guest_rip();
 
 #ifdef _INTELMACHINE
@@ -36,6 +38,7 @@ namespace arch
 	vmx_exit_qualification_mov_cr get_exit_qualification_mov_cr();
 
 	std::uint64_t get_guest_physical_address();
+	std::uint64_t get_guest_linear_address();
 
 	void invalidate_vpid_current();
 	std::uint16_t get_current_vpid();
@@ -49,6 +52,9 @@ namespace arch
 
 	// Event injection (inject exception into guest on VM entry)
 	void inject_exception(std::uint8_t vector);
+
+	// Virtual-APIC page physical address (for reading guest CR8/TPR)
+	std::uint64_t get_virtual_apic_address();
 #else
 	vmcb_t* get_vmcb();
 	void parse_vmcb_gadget(const std::uint8_t* get_vmcb_gadget);

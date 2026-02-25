@@ -496,6 +496,7 @@ std::uint8_t resolve_offsets_from_pdb()
 	sys::offsets::ktrap_frame_rdx = resolve("_KTRAP_FRAME", L"Rdx");
 	sys::offsets::ktrap_frame_r8  = resolve("_KTRAP_FRAME", L"R8");
 	sys::offsets::ktrap_frame_r9  = resolve("_KTRAP_FRAME", L"R9");
+	sys::offsets::ktrap_frame_r10 = resolve("_KTRAP_FRAME", L"R10");
 
 	std::println("[pdb] KTRAP_FRAME offsets: Rax=0x{:X} Rcx=0x{:X} Rdx=0x{:X} R8=0x{:X} R9=0x{:X} Rip=0x{:X} Rsp=0x{:X}",
 		sys::offsets::ktrap_frame_rax, sys::offsets::ktrap_frame_rcx,
@@ -503,16 +504,12 @@ std::uint8_t resolve_offsets_from_pdb()
 		sys::offsets::ktrap_frame_r9, sys::offsets::ktrap_frame_rip,
 		sys::offsets::ktrap_frame_rsp);
 
-	// resolve MmAccessFault RVA for EPT hook
+	// resolve MmAccessFault RVA (kept for diagnostics, no longer hooked)
 	ULONG mmaf_rva = pdb_get_rva(&pdb_ctx, "MmAccessFault");
 	if (mmaf_rva != 0 && mmaf_rva != static_cast<ULONG>(-1))
 	{
 		sys::offsets::mm_access_fault_rva = static_cast<std::uint64_t>(mmaf_rva);
 		std::println("[pdb] MmAccessFault RVA: 0x{:X}", sys::offsets::mm_access_fault_rva);
-	}
-	else
-	{
-		std::println("[pdb] WARNING: failed to resolve MmAccessFault RVA");
 	}
 
 	// resolve KiSystemServiceExit RVA for syscall return EPT hook
@@ -545,6 +542,54 @@ std::uint8_t resolve_offsets_from_pdb()
 		std::println("[pdb] WARNING: NtClose not found");
 	}
 
+	// resolve MmCleanProcessAddressSpace RVA for process death cleanup hook
+	ULONG mmclean_rva = pdb_get_rva(&pdb_ctx, "MmCleanProcessAddressSpace");
+	if (mmclean_rva != 0 && mmclean_rva != static_cast<ULONG>(-1))
+	{
+		sys::offsets::mm_clean_process_address_space_rva = static_cast<std::uint64_t>(mmclean_rva);
+		std::println("[pdb] MmCleanProcessAddressSpace RVA: 0x{:X}", sys::offsets::mm_clean_process_address_space_rva);
+	}
+	else
+	{
+		std::println("[pdb] WARNING: MmCleanProcessAddressSpace not found");
+	}
+
+	// resolve PsWatchWorkingSet RVA for working set monitoring suppression hook
+	ULONG pswatch_rva = pdb_get_rva(&pdb_ctx, "PsWatchWorkingSet");
+	if (pswatch_rva != 0 && pswatch_rva != static_cast<ULONG>(-1))
+	{
+		sys::offsets::ps_watch_working_set_rva = static_cast<std::uint64_t>(pswatch_rva);
+		std::println("[pdb] PsWatchWorkingSet RVA: 0x{:X}", sys::offsets::ps_watch_working_set_rva);
+	}
+	else
+	{
+		std::println("[pdb] WARNING: PsWatchWorkingSet not found");
+	}
+
+	// resolve KiDispatchException RVA for safe memory probe EPT hook
+	ULONG kde_rva = pdb_get_rva(&pdb_ctx, "KiDispatchException");
+	if (kde_rva != 0 && kde_rva != static_cast<ULONG>(-1))
+	{
+		sys::offsets::ki_dispatch_exception_rva = static_cast<std::uint64_t>(kde_rva);
+		std::println("[pdb] KiDispatchException RVA: 0x{:X}", sys::offsets::ki_dispatch_exception_rva);
+	}
+	else
+	{
+		std::println("[pdb] WARNING: KiDispatchException not found");
+	}
+
+	// resolve KiPageFault RVA for inline page fault handler EPT hook
+	ULONG kpf_rva = pdb_get_rva(&pdb_ctx, "KiPageFault");
+	if (kpf_rva != 0 && kpf_rva != static_cast<ULONG>(-1))
+	{
+		sys::offsets::ki_page_fault_rva = static_cast<std::uint64_t>(kpf_rva);
+		std::println("[pdb] KiPageFault RVA: 0x{:X}", sys::offsets::ki_page_fault_rva);
+	}
+	else
+	{
+		std::println("[pdb] WARNING: KiPageFault not found");
+	}
+
 	pdb_unload(pdb_path, &pdb_ctx);
 
 	return 1;
@@ -575,6 +620,7 @@ void apply_fallback_offsets()
 	sys::offsets::ktrap_frame_rdx = 0x40;
 	sys::offsets::ktrap_frame_r8  = 0x48;
 	sys::offsets::ktrap_frame_r9  = 0x50;
+	sys::offsets::ktrap_frame_r10 = 0x58;
 }
 
 std::uint8_t sys::set_up()
@@ -612,7 +658,6 @@ std::uint8_t sys::set_up()
 	if (hook::set_up() == 0)
 	{
 		std::println("unable to set up kernel hook helper");
-
 		return 0;
 	}
 

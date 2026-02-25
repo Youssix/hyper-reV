@@ -55,7 +55,7 @@ void slat::hook::set_up_entries()
 	current_entry->set_next(nullptr);
 }
 
-std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_address, const virtual_address_t shadow_guest_physical_address)
+std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_address, const virtual_address_t shadow_guest_physical_address, const std::uint64_t hook_byte_length)
 {
 	hook_mutex.lock();
 
@@ -72,19 +72,10 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 
 	std::uint8_t paging_split_state = 0;
 
-	slat_pte* const target_pte = get_pte(hyperv_cr3(), target_guest_physical_address, 1, &paging_split_state);
-
-	if (target_pte == nullptr)
-	{
-		hook_mutex.release();
-
-		return 0;
-	}
-
 #ifdef _INTELMACHINE
-	slat_pte* const hook_target_pte = fork_get_pte(hook_cr3(), hyperv_cr3(), target_guest_physical_address, 1);
+	slat_pte* const hook_target_pte = fork_get_pte(hook_cr3(), hyperv_cr3(), target_guest_physical_address, 1, &paging_split_state);
 #else
-	slat_pte* const hook_target_pte = get_pte(hook_cr3(), target_guest_physical_address, 1);
+	slat_pte* const hook_target_pte = get_pte(hook_cr3(), target_guest_physical_address, 1, &paging_split_state);
 #endif
 
 	if (hook_target_pte == nullptr)
@@ -125,45 +116,61 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 	available_hook_list_head = hook_entry->next();
 
 	hook_entry->set_next(used_hook_list_head);
-	hook_entry->set_original_pfn(target_pte->page_frame_number);
+	hook_entry->set_original_pfn(hook_target_pte->page_frame_number);
 	hook_entry->set_paging_split_state(paging_split_state);
 	hook_entry->set_hook_byte_offset(target_guest_physical_address.offset);
-	hook_entry->set_hook_byte_length(0);
+	hook_entry->set_hook_byte_length(hook_byte_length);
+	hook_entry->set_hook_byte_offset2(0);
+	hook_entry->set_hook_byte_length2(0);
 
 	used_hook_list_head = hook_entry;
 
 #ifdef _INTELMACHINE
-	hook_entry->set_original_read_access(target_pte->read_access);
-	hook_entry->set_original_write_access(target_pte->write_access);
-	hook_entry->set_original_execute_access(target_pte->execute_access);
-	hook_entry->set_original_user_mode_execute(target_pte->user_mode_execute);
+	hook_entry->set_original_read_access(hook_target_pte->read_access);
+	hook_entry->set_original_write_access(hook_target_pte->write_access);
+	hook_entry->set_original_execute_access(hook_target_pte->execute_access);
+	hook_entry->set_original_user_mode_execute(hook_target_pte->user_mode_execute);
 
-	// hyperv_cr3: shadow PFN, --X (execute hook code)
-	target_pte->page_frame_number = shadow_page_host_physical_address >> 12;
-	target_pte->execute_access = 1;
-	target_pte->user_mode_execute = 1;
-	target_pte->read_access = 0;
-	target_pte->write_access = 0;
-
-	// hook_cr3: original PFN, R-- (read original, writes trigger MTF)
-	hook_target_pte->execute_access = 0;
-	hook_target_pte->user_mode_execute = 0;
-	hook_target_pte->read_access = 1;
+	// hook_cr3: shadow PFN, --X (execute-only)
+	// Execute → shadow page directly (zero VMEXIT)
+	// Read/Write → EPT violation → swap to hyperv_cr3 (original RWX) + MTF → swap back
+	hook_target_pte->page_frame_number = shadow_page_host_physical_address >> 12;
+	hook_target_pte->execute_access = 1;
+	hook_target_pte->user_mode_execute = 1;
+	hook_target_pte->read_access = 0;
 	hook_target_pte->write_access = 0;
 #else
-	hook_entry->set_original_execute_access(!target_pte->execute_disable);
+	hook_entry->set_original_execute_access(!hook_target_pte->execute_disable);
 
 	hook_target_pte->execute_disable = 0;
 	hook_target_pte->page_frame_number = shadow_page_host_physical_address >> 12;
 
 	fix_split_instructions(hook_cr3(), target_guest_physical_address);
-
-	target_pte->execute_disable = 1;
 #endif
 
 	hook_mutex.release();
 
 	flush_all_logical_processors_cache();
+
+	return 1;
+}
+
+std::uint64_t slat::hook::add_to_same_page(const virtual_address_t target_gpa, const std::uint64_t hook_byte_length)
+{
+	hook_mutex.lock();
+
+	entry_t* const existing = entry_t::find(target_gpa.address >> 12);
+
+	if (existing == nullptr)
+	{
+		hook_mutex.release();
+		return 0;
+	}
+
+	existing->set_hook_byte_offset2(target_gpa.offset);
+	existing->set_hook_byte_length2(hook_byte_length);
+
+	hook_mutex.release();
 
 	return 1;
 }
@@ -189,13 +196,6 @@ std::uint8_t does_hook_need_merge(const slat::hook::entry_t* const hook_entry, c
 
 std::uint8_t clean_up_hook_ptes(const virtual_address_t target_guest_physical_address, const slat::hook::entry_t* const hook_entry)
 {
-	slat_pte* const target_pte = slat::get_pte(slat::hyperv_cr3(), target_guest_physical_address);
-
-	if (target_pte == nullptr)
-	{
-		return 0;
-	}
-
 	slat_pte* const hook_target_pte = slat::get_pte(slat::hook_cr3(), target_guest_physical_address);
 
 	if (hook_target_pte == nullptr)
@@ -204,29 +204,20 @@ std::uint8_t clean_up_hook_ptes(const virtual_address_t target_guest_physical_ad
 	}
 
 #ifdef _INTELMACHINE
-	target_pte->page_frame_number = hook_entry->original_pfn();
-
-	target_pte->read_access = hook_entry->original_read_access();
-	target_pte->write_access = hook_entry->original_write_access();
-	target_pte->execute_access = hook_entry->original_execute_access();
-	target_pte->user_mode_execute = hook_entry->original_user_mode_execute();
-
+	hook_target_pte->page_frame_number = hook_entry->original_pfn();
 	hook_target_pte->read_access = hook_entry->original_read_access();
 	hook_target_pte->write_access = hook_entry->original_write_access();
 	hook_target_pte->execute_access = hook_entry->original_execute_access();
 	hook_target_pte->user_mode_execute = hook_entry->original_user_mode_execute();
 #else
-	target_pte->execute_disable = !hook_entry->original_execute_access();
-
 	hook_target_pte->page_frame_number = hook_entry->original_pfn();
-	hook_target_pte->execute_disable = 1;
+	hook_target_pte->execute_disable = !hook_entry->original_execute_access();
 
 	unfix_split_instructions(hook_entry, slat::hook_cr3(), target_guest_physical_address);
 #endif
 
 	if (does_hook_need_merge(hook_entry, target_guest_physical_address) == 1)
 	{
-		slat::merge_4kb_pt(slat::hyperv_cr3(), target_guest_physical_address);
 		slat::merge_4kb_pt(slat::hook_cr3(), target_guest_physical_address);
 	}
 
@@ -273,4 +264,22 @@ std::uint64_t slat::hook::remove(const virtual_address_t guest_physical_address)
 	flush_all_logical_processors_cache();
 
 	return pte_cleanup_status;
+}
+
+void slat::hook::remove_all()
+{
+	hook_mutex.lock();
+
+	while (used_hook_list_head != nullptr)
+	{
+		entry_t* const hook_entry = used_hook_list_head;
+
+		const virtual_address_t gpa = { .address = hook_entry->original_pfn() << 12 };
+		clean_up_hook_ptes(gpa, hook_entry);
+		clean_up_hook_entry(hook_entry, nullptr);
+	}
+
+	hook_mutex.release();
+
+	flush_all_logical_processors_cache();
 }

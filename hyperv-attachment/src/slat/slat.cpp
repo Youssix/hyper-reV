@@ -64,7 +64,11 @@ std::uint8_t slat::hide_heap_pages(const cr3 slat_cr3)
 
 std::uint64_t slat::hide_physical_page_from_guest(const cr3 slat_cr3, const virtual_address_t guest_physical_address)
 {
-	slat_pte* const target_pte = get_pte(slat_cr3, guest_physical_address, 1);
+	// Use fork_get_pte for hook_cr3: its intermediate pages (PDPT/PD/PT) are shared
+	// with hyperv_cr3 (shallow copy). get_pte with force_split=1 would split a 2MB PDE
+	// on the SHARED PD page, corrupting hyperv_cr3's EPT → HyperGuard hash mismatch.
+	// fork_get_pte allocates private copies of shared intermediates before modifying.
+	slat_pte* const target_pte = fork_get_pte(slat_cr3, hyperv_cr3(), guest_physical_address, 1);
 
 	if (target_pte == nullptr)
 	{
@@ -78,5 +82,8 @@ std::uint64_t slat::hide_physical_page_from_guest(const cr3 slat_cr3, const virt
 
 std::uint64_t slat::hide_physical_page_from_guest(const virtual_address_t guest_physical_address)
 {
-	return hide_physical_page_from_guest(hyperv_cr3(), guest_physical_address) && hide_physical_page_from_guest(hook_cr3(), guest_physical_address);
+	// Only hide in hook_cr3. DO NOT modify hyperv_cr3 — HyperGuard hashes EPT pages
+	// and detects any modification (PAGE_HASH_MISMATCH). Heap pages remain accessible
+	// in hyperv_cr3 via 2MB identity map, but guest page tables don't map them.
+	return hide_physical_page_from_guest(hook_cr3(), guest_physical_address);
 }

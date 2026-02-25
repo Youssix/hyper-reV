@@ -909,63 +909,6 @@ void process_sethidden(CLI::App* sethidden)
 	std::println("hidden test CR3s set: original=0x{:X} clone=0x{:X}", hidden_original_cr3, hidden_clone_cr3);
 }
 
-CLI::App* init_hookmmaf(CLI::App& app, CLI::Transformer& aliases_transformer)
-{
-	CLI::App* hookmmaf = app.add_subcommand("hookmmaf", "install MmAccessFault EPT hook (catches page faults on hidden memory, swaps CR3 to clone)")->ignore_case();
-
-	add_transformed_command_option(hookmmaf, "clone_cr3", aliases_transformer)->required();
-
-	return hookmmaf;
-}
-
-void process_hookmmaf(CLI::App* hookmmaf)
-{
-	const std::uint64_t clone_cr3 = get_command_option<std::uint64_t>(hookmmaf, "clone_cr3");
-
-	if (inject::install_mmaf_hook(clone_cr3))
-	{
-		std::println("MmAccessFault hook installed (clone_cr3=0x{:X})", clone_cr3);
-	}
-	else
-	{
-		std::println("failed to install MmAccessFault hook");
-	}
-}
-
-CLI::App* init_unhookmmaf(CLI::App& app)
-{
-	CLI::App* unhookmmaf = app.add_subcommand("unhookmmaf", "remove MmAccessFault EPT hook")->ignore_case();
-
-	return unhookmmaf;
-}
-
-void process_unhookmmaf(CLI::App* unhookmmaf)
-{
-	if (inject::remove_mmaf_hook())
-	{
-		std::println("MmAccessFault hook removed");
-	}
-	else
-	{
-		std::println("failed to remove MmAccessFault hook");
-	}
-}
-
-CLI::App* init_mmafstat(CLI::App& app)
-{
-	CLI::App* mmafstat = app.add_subcommand("mmafstat", "show MmAccessFault hook hit counter")->ignore_case();
-
-	return mmafstat;
-}
-
-void process_mmafstat(CLI::App* mmafstat)
-{
-	const std::uint64_t hit_count = hypercall::read_mmaf_hit_count();
-	const std::uint64_t violation_count = hypercall::read_slat_violation_count();
-
-	std::println("mmaf_hit_count = {}, slat_violation_count = {}", hit_count, violation_count);
-}
-
 CLI::App* init_hookcb(CLI::App& app)
 {
 	CLI::App* hookcb = app.add_subcommand("hookcb", "install InstrumentationCallback bypass hook on KiSystemCall64 (protects PML4[70] syscalls from callback redirection)")->ignore_case();
@@ -1010,6 +953,79 @@ void process_unhookcb(CLI::App* unhookcb)
 	}
 }
 
+CLI::App* init_hookblt(CLI::App& app)
+{
+	return app.add_subcommand("hookblt", "install screenshot hooks on NtGdiBitBlt / NtGdiStretchBlt (anti-cheat capture interception)")->ignore_case();
+}
+
+void process_hookblt(CLI::App* hookblt)
+{
+	if (inject::install_blt_hooks())
+	{
+		// Enable the screenshot hook feature via CPUID(30, sub_cmd=4)
+		std::uint64_t result = hypercall::screenshot_enable();
+		std::println("[+] Screenshot hooks installed and enabled (result: {})", result);
+	}
+	else
+	{
+		std::println("[-] Failed to install screenshot hooks");
+	}
+}
+
+CLI::App* init_unhookblt(CLI::App& app)
+{
+	return app.add_subcommand("unhookblt", "remove screenshot hooks from NtGdiBitBlt / NtGdiStretchBlt")->ignore_case();
+}
+
+void process_unhookblt(CLI::App* unhookblt)
+{
+	// Disable the screenshot hook feature via CPUID(30, sub_cmd=5)
+	hypercall::screenshot_disable();
+
+	if (inject::remove_blt_hooks())
+	{
+		std::println("[+] Screenshot hooks disabled and removed");
+	}
+	else
+	{
+		std::println("[-] Failed to remove screenshot hooks (may not be installed)");
+	}
+}
+
+CLI::App* init_hookws(CLI::App& app)
+{
+	return app.add_subcommand("hookws", "install PsWatchWorkingSet hook (suppress working set monitoring for hidden memory)")->ignore_case();
+}
+
+void process_hookws(CLI::App* hookws)
+{
+	if (inject::install_pswatch_hook())
+	{
+		std::println("[+] PsWatchWorkingSet hook installed");
+	}
+	else
+	{
+		std::println("[-] Failed to install PsWatchWorkingSet hook");
+	}
+}
+
+CLI::App* init_unhookws(CLI::App& app)
+{
+	return app.add_subcommand("unhookws", "remove PsWatchWorkingSet hook")->ignore_case();
+}
+
+void process_unhookws(CLI::App* unhookws)
+{
+	if (inject::remove_pswatch_hook())
+	{
+		std::println("[+] PsWatchWorkingSet hook removed");
+	}
+	else
+	{
+		std::println("[-] Failed to remove PsWatchWorkingSet hook");
+	}
+}
+
 CLI::App* init_injectdll(CLI::App& app)
 {
 	CLI::App* injectdll = app.add_subcommand("injectdll", "inject a DLL into a process using hidden memory (PE manual map + syscall exit EPT hook)")->ignore_case();
@@ -1048,6 +1064,156 @@ void process_uninject(CLI::App* uninject)
 {
 	if (!uninject->parsed()) return;
 	inject::uninject();
+}
+
+CLI::App* init_hookstatus(CLI::App& app)
+{
+	return app.add_subcommand("hookstatus", "show EPT hook and cleanup diagnostics")->ignore_case();
+}
+
+void process_hookstatus(CLI::App* hookstatus)
+{
+	if (!hookstatus->parsed()) return;
+	std::println("[+] Diagnostics:");
+	std::println("    cr3_exits:        {}", hypercall::read_cr3_exit_count());
+	std::println("    cr3_swaps:        {}", hypercall::read_cr3_swap_count());
+	std::println("    ept_violations:   {}", hypercall::read_slat_violation_count());
+	std::println("    mmaf_hits:        {}", hypercall::read_mmaf_hit_count());
+	std::println("    cleanup_count:    {}", hypercall::read_cleanup_count());
+	std::println("    hijack_cpuid:     {}", hypercall::read_hijack_cpuid_count());
+	std::println("    hijack_claimed:   {}", hypercall::read_hijack_claimed_count());
+	std::println("    hijack_armed:     {}", hypercall::read_hijack_armed_state());
+}
+
+CLI::App* init_boothook(CLI::App& app)
+{
+	return app.add_subcommand("boothook", "show boot-time hook installation status")->ignore_case();
+}
+
+void process_boothook(CLI::App* boothook)
+{
+	if (!boothook->parsed()) return;
+
+	const std::uint64_t flags = hypercall::read_boot_hook_diag(0);
+	const std::uint64_t ntos_base = hypercall::read_boot_hook_diag(1);
+	const std::uint64_t psgetprocname = hypercall::read_boot_hook_diag(2);
+
+	// extract target name from packed flags (7 chars in bits 8..63)
+	char name[8] = {};
+	for (int i = 0; i < 7; i++)
+		name[i] = static_cast<char>((flags >> (8 + i * 8)) & 0xFF);
+	name[7] = '\0';
+
+	const std::uint64_t hit_count = hypercall::read_boot_hook_diag(3);
+	const std::uint64_t match_count = hypercall::read_boot_hook_diag(4);
+	const std::uint64_t entry_count = hypercall::read_boot_hook_diag(5);
+
+	std::println("[+] Boot Hook Status:");
+	std::println("    mmclean_active:   {}", (flags & 1) ? "YES" : "NO");
+	std::println("    armed:            {}", (flags & 2) ? "YES" : "NO");
+	std::println("    PsGetProcName:    {}", (flags & 4) ? "YES" : "NO");
+	std::println("    hidden_pt:        {}", (flags & 8) ? "YES" : "NO");
+	std::println("    hidden_pml4e:     {}", (flags & 16) ? "YES" : "NO");
+	std::println("    target_name:      \"{}\"", name);
+	std::println("    ntoskrnl_base:    0x{:X}", ntos_base);
+	std::println("    PsGetProcNameVA:  0x{:X}", psgetprocname);
+	std::println("    hook_entries:     {} (unconditional)", entry_count);
+	std::println("    hook_hits:        {} (armed+fn ok)", hit_count);
+	std::println("    hook_matches:     {} (name match)", match_count);
+	std::println("    cleanup_count:    {}", hypercall::read_cleanup_count());
+}
+
+CLI::App* init_testmm(CLI::App& app)
+{
+	auto* cmd = app.add_subcommand("testmm", "minimal MmClean hook test: attach + install + arm (no DLL)")->ignore_case();
+	cmd->add_option("process_name", "target process name")->required();
+	return cmd;
+}
+
+void process_testmm(CLI::App* testmm)
+{
+	if (!testmm->parsed()) return;
+
+	const std::string process_name = testmm->get_option("process_name")->as<std::string>();
+
+	// 1. Cleanup stale state
+	hypercall::disable_cr3_intercept();
+
+	// 2. Find process
+	auto process = sys::process::find_process_by_name(process_name);
+	if (!process.has_value())
+	{
+		std::println("[-] Process '{}' not found", process_name);
+		return;
+	}
+	std::println("[+] Found {} (PID: {}, CR3: 0x{:X}, EPROCESS: 0x{:X})",
+		process->name, process->pid, process->cr3, process->eprocess);
+
+	// 3. Clone CR3
+	std::uint64_t cloned_cr3 = hypercall::clone_guest_cr3(process->cr3);
+	if (cloned_cr3 == 0)
+	{
+		std::println("[-] Failed to clone CR3");
+		return;
+	}
+	std::println("[+] Cloned CR3: 0x{:X}", cloned_cr3);
+
+	// 4. Enable CR3 intercept
+	if (hypercall::enable_cr3_intercept(process->cr3, cloned_cr3) == 0)
+	{
+		std::println("[-] Failed to enable CR3 intercept");
+		return;
+	}
+	std::println("[+] CR3 intercept enabled");
+
+	// 5. Setup hidden region (uses pre-existing from boot)
+	std::uint64_t hidden_base = hypercall::setup_hidden_region(70);
+	if (hidden_base == 0)
+	{
+		std::println("[-] Failed to setup hidden region");
+		hypercall::disable_cr3_intercept();
+		return;
+	}
+	std::println("[+] Hidden region at 0x{:X}", hidden_base);
+
+	// 5b. Initialize hook infrastructure (kernel detour holder + EPT split)
+	// Required for MMAF shellcode allocation — inject_dll calls this but testmm didn't
+	if (hook::set_up() == 0)
+	{
+		std::println("[-] hook::set_up() failed — cannot install MMAF safety net");
+		hypercall::disable_cr3_intercept();
+		return;
+	}
+	std::println("[+] Hook infrastructure initialized");
+
+	// 6. MmAccessFault C++ EPT hook — safety net for hidden memory #PFs
+	if (inject::install_mmaf_cpp_hook(cloned_cr3, 70))
+		std::println("[+] MmAccessFault safety net active");
+	else
+		std::println("[!] WARNING: MmAccessFault hook failed — hidden memory faults will BSOD");
+
+	// 7. Install MmClean EPT hook (RVA from PDB)
+	if (!inject::install_mmclean_hook(process->eprocess))
+	{
+		std::println("[-] MmClean hook install failed");
+		hypercall::disable_cr3_intercept();
+		return;
+	}
+
+	// 8. Arm with process name
+	char target_name_buf[16] = {};
+	for (size_t i = 0; i < process->name.size() && i < 15; i++)
+		target_name_buf[i] = process->name[i];
+
+	const auto& ntoskrnl = sys::kernel::modules_list["ntoskrnl.exe"];
+	std::uint64_t arm_result = hypercall::arm_process_cleanup(process->eprocess, ntoskrnl.base_address, target_name_buf);
+
+	if (arm_result == 0)
+		std::println("[!] WARNING: arm_process_cleanup returned 0 — PsGetProcessImageFileName resolution FAILED");
+	else
+		std::println("[+] MmClean armed for '{}' (PsGetProcessImageFileName resolved)", process->name);
+
+	std::println("[+] testmm active — kill {} and run 'boothook' to check counters", process->name);
 }
 
 std::unordered_map<std::string, std::uint64_t> form_aliases()
@@ -1111,13 +1277,17 @@ void commands::process(const std::string command)
 	CLI::App* maphidden = init_maphidden(app);
 	CLI::App* testhidden = init_testhidden(app);
 	CLI::App* sethidden = init_sethidden(app, aliases_transformer);
-	CLI::App* hookmmaf = init_hookmmaf(app, aliases_transformer);
-	CLI::App* unhookmmaf = init_unhookmmaf(app);
-	CLI::App* mmafstat = init_mmafstat(app);
 	CLI::App* hookcb = init_hookcb(app);
 	CLI::App* unhookcb = init_unhookcb(app);
+	CLI::App* hookblt = init_hookblt(app);
+	CLI::App* unhookblt = init_unhookblt(app);
+	CLI::App* hookws = init_hookws(app);
+	CLI::App* unhookws = init_unhookws(app);
 	CLI::App* injectdll = init_injectdll(app);
 	CLI::App* uninject = init_uninject(app);
+	CLI::App* hookstatus = init_hookstatus(app);
+	CLI::App* boothook = init_boothook(app);
+	CLI::App* testmm = init_testmm(app);
 
 	try
 	{
@@ -1153,13 +1323,17 @@ void commands::process(const std::string command)
 		d_process_command(maphidden);
 		d_process_command(testhidden);
 		d_process_command(sethidden);
-		d_process_command(hookmmaf);
-		d_process_command(unhookmmaf);
-		d_process_command(mmafstat);
 		d_process_command(hookcb);
 		d_process_command(unhookcb);
+		d_process_command(hookblt);
+		d_process_command(unhookblt);
+		d_process_command(hookws);
+		d_process_command(unhookws);
 		d_process_command(injectdll);
 		d_process_command(uninject);
+		d_process_command(hookstatus);
+		d_process_command(boothook);
+		d_process_command(testmm);
 	}
 	catch (const CLI::ParseError& error)
 	{

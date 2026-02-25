@@ -19,7 +19,7 @@ namespace slat
 
 	std::uint8_t merge_4kb_pt(cr3 slat_cr3,virtual_address_t guest_physical_address);
 
-	slat_pte* fork_get_pte(cr3 hook_cr3, cr3 hyperv_cr3, virtual_address_t gpa, std::uint8_t force_split = 0);
+	slat_pte* fork_get_pte(cr3 hook_cr3, cr3 hyperv_cr3, virtual_address_t gpa, std::uint8_t force_split = 0, std::uint8_t* paging_split_state = nullptr);
 
 	std::uint8_t is_pte_present(const void* pte_in);
 	std::uint8_t is_pte_large(const void* pte_in);

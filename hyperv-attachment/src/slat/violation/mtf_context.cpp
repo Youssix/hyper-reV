@@ -17,7 +17,7 @@ void slat::mtf::set_up()
 	crt::set_memory(contexts, 0, sizeof(contexts));
 }
 
-void slat::mtf::arm(const std::uint16_t vpid, const std::uint64_t gpa, slat_pte* const hook_pte, const std::uint64_t saved_flags)
+void slat::mtf::arm(const std::uint16_t vpid, const std::uint64_t gpa, slat_pte* const hook_pte, const std::uint64_t saved_flags, const std::uint8_t is_write)
 {
 	if (vpid >= max_contexts)
 	{
@@ -30,6 +30,7 @@ void slat::mtf::arm(const std::uint16_t vpid, const std::uint64_t gpa, slat_pte*
 	ctx->hook_pte = hook_pte;
 	ctx->saved_pte_flags = saved_flags;
 	ctx->active = 1;
+	ctx->is_write = is_write;
 }
 
 std::uint8_t slat::mtf::process()
@@ -58,82 +59,120 @@ std::uint8_t slat::mtf::process()
 	// 2. Disable MTF
 	arch::disable_mtf();
 
-	// 3. Sync shadow page: copy original -> shadow, preserving hook bytes
-	const virtual_address_t gpa = { .address = ctx->pending_gpa };
-	const std::uint64_t faulting_pfn = ctx->pending_gpa >> 12;
-
-	const hook::entry_t* const hook_entry = hook::entry_t::find(faulting_pfn);
-
-	if (hook_entry != nullptr)
+	// 3. Sync shadow page if this was a write violation
+	if (ctx->is_write)
 	{
-		// Get shadow page from hyperv_cr3 PTE (it points to shadow PFN)
-		slat_pte* const hyperv_pte = get_pte(hyperv_cr3(), gpa);
+		const virtual_address_t gpa = { .address = ctx->pending_gpa };
+		const std::uint64_t faulting_pfn = ctx->pending_gpa >> 12;
 
-		if (hyperv_pte != nullptr)
+		const hook::entry_t* const hook_entry = hook::entry_t::find(faulting_pfn);
+
+		if (hook_entry != nullptr)
 		{
-			const std::uint64_t shadow_pfn = hyperv_pte->page_frame_number;
-			const std::uint64_t original_pfn = hook_entry->original_pfn();
+			// Get shadow page from hook_cr3 PTE (shadow PFN is now in hook_cr3)
+			slat_pte* const hook_cr3_pte = get_pte(hook_cr3(), gpa);
 
-			auto shadow_page = static_cast<std::uint8_t*>(memory_manager::map_host_physical(shadow_pfn << 12));
-			const auto original_page = static_cast<const std::uint8_t*>(memory_manager::map_host_physical(original_pfn << 12));
-
-			const std::uint64_t hook_offset = hook_entry->hook_byte_offset();
-			const std::uint64_t hook_length = hook_entry->hook_byte_length();
-
-			if (hook_length > 0 && hook_offset + hook_length <= 0x1000)
+			if (hook_cr3_pte != nullptr)
 			{
-				// Copy bytes before hook region
-				if (hook_offset > 0)
+				const std::uint64_t shadow_pfn = hook_cr3_pte->page_frame_number;
+				const std::uint64_t original_pfn = hook_entry->original_pfn();
+
+				auto shadow_page = static_cast<std::uint8_t*>(memory_manager::map_host_physical(shadow_pfn << 12));
+				const auto original_page = static_cast<const std::uint8_t*>(memory_manager::map_host_physical(original_pfn << 12));
+
+				const std::uint64_t hook_offset1 = hook_entry->hook_byte_offset();
+				const std::uint64_t hook_length1 = hook_entry->hook_byte_length();
+				const std::uint64_t hook_offset2 = hook_entry->hook_byte_offset2();
+				const std::uint64_t hook_length2 = hook_entry->hook_byte_length2();
+
+				if (hook_length1 > 0 && hook_offset1 + hook_length1 <= 0x1000)
 				{
-					crt::copy_memory(shadow_page, original_page, hook_offset);
+					// Determine first and second regions in page order
+					std::uint64_t off_a = hook_offset1, len_a = hook_length1;
+					std::uint64_t off_b = hook_offset2, len_b = hook_length2;
+
+					const std::uint8_t has_second = (len_b > 0 && off_b + len_b <= 0x1000) ? 1 : 0;
+
+					// Sort so region A comes first in the page
+					if (has_second && off_b < off_a)
+					{
+						std::uint64_t tmp;
+						tmp = off_a; off_a = off_b; off_b = tmp;
+						tmp = len_a; len_a = len_b; len_b = tmp;
+					}
+
+					// Segment 1: [0, off_a)
+					if (off_a > 0)
+					{
+						crt::copy_memory(shadow_page, original_page, off_a);
+					}
+
+					if (has_second)
+					{
+						// Segment 2: [off_a + len_a, off_b)
+						const std::uint64_t gap_start = off_a + len_a;
+						if (off_b > gap_start)
+						{
+							crt::copy_memory(shadow_page + gap_start, original_page + gap_start, off_b - gap_start);
+						}
+
+						// Segment 3: [off_b + len_b, 0x1000)
+						const std::uint64_t after_b = off_b + len_b;
+						if (after_b < 0x1000)
+						{
+							crt::copy_memory(shadow_page + after_b, original_page + after_b, 0x1000 - after_b);
+						}
+					}
+					else
+					{
+						// Single hook: segment after region A
+						const std::uint64_t after_offset = off_a + len_a;
+						if (after_offset < 0x1000)
+						{
+							crt::copy_memory(shadow_page + after_offset, original_page + after_offset, 0x1000 - after_offset);
+						}
+					}
 				}
-
-				// Copy bytes after hook region
-				const std::uint64_t after_offset = hook_offset + hook_length;
-				const std::uint64_t after_size = 0x1000 - after_offset;
-
-				if (after_size > 0)
+				else
 				{
-					crt::copy_memory(shadow_page + after_offset, original_page + after_offset, after_size);
-				}
-			}
-			else
-			{
-				// hook_byte_length not set — save shadow's current content (contains hook patch),
-				// copy entire original page, then restore the saved hook patch bytes.
-				// The hook patch starts at hook_offset within the page.
-				// Use a conservative 14-byte save (push+mov+ret detour size) if length is unknown.
-				constexpr std::uint64_t default_patch_size = 14;
-				const std::uint64_t save_offset = hook_offset;
-				const std::uint64_t save_length = (save_offset + default_patch_size <= 0x1000) ? default_patch_size : (0x1000 - save_offset);
+					// hook_byte_length not set — save shadow's current content (contains hook patch),
+					// copy entire original page, then restore the saved hook patch bytes.
+					constexpr std::uint64_t default_patch_size = 14;
+					const std::uint64_t save_offset = hook_offset1;
+					const std::uint64_t save_length = (save_offset + default_patch_size <= 0x1000) ? default_patch_size : (0x1000 - save_offset);
 
-				std::uint8_t saved_hook_bytes[16] = { };
+					std::uint8_t saved_hook_bytes[16] = { };
 
-				if (save_length > 0 && save_length <= sizeof(saved_hook_bytes))
-				{
-					crt::copy_memory(saved_hook_bytes, shadow_page + save_offset, save_length);
-				}
+					if (save_length > 0 && save_length <= sizeof(saved_hook_bytes))
+					{
+						crt::copy_memory(saved_hook_bytes, shadow_page + save_offset, save_length);
+					}
 
-				// Copy entire original page to shadow
-				crt::copy_memory(shadow_page, original_page, 0x1000);
+					// Copy entire original page to shadow
+					crt::copy_memory(shadow_page, original_page, 0x1000);
 
-				// Restore the hook patch bytes
-				if (save_length > 0 && save_length <= sizeof(saved_hook_bytes))
-				{
-					crt::copy_memory(shadow_page + save_offset, saved_hook_bytes, save_length);
+					// Restore the hook patch bytes
+					if (save_length > 0 && save_length <= sizeof(saved_hook_bytes))
+					{
+						crt::copy_memory(shadow_page + save_offset, saved_hook_bytes, save_length);
+					}
 				}
 			}
 		}
 	}
 
-	// 4. Flush EPT cache
+	// 4. Swap EPTP back to hook_cr3 (guest resumes on our EPTP)
+	set_cr3(hook_cr3());
+
+	// 5. Flush EPT cache
 	flush_current_logical_processor_cache();
 
-	// 5. Clear context
+	// 6. Clear context
 	ctx->active = 0;
 	ctx->hook_pte = nullptr;
 	ctx->pending_gpa = 0;
 	ctx->saved_pte_flags = 0;
+	ctx->is_write = 0;
 
 	return 1;
 #else

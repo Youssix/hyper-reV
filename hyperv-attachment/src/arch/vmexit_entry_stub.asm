@@ -3,6 +3,46 @@ extern original_vmexit_entry_trampoline : qword
 
 .code
 	vmexit_entry_hook_stub proc
+		; === Fix B: Early exit reason filter ===
+		; Skip full GPR save/restore + C handler for exit reasons we don't handle.
+		; Saves ~300-500ns per non-handled VMEXIT (~90% of exits).
+		push rax
+		push rdx
+
+		mov rdx, 4402h              ; VMCS_EXIT_REASON
+		vmread rax, rdx
+		and eax, 0FFFFh             ; mask to basic exit reason
+
+		cmp eax, 00h                ; EXCEPTION_OR_NMI
+		je enter_handler
+		cmp eax, 0Ah                ; CPUID
+		je enter_handler
+		cmp eax, 1Ch                ; MOV_CR
+		je enter_handler
+		cmp eax, 25h                ; MONITOR_TRAP_FLAG
+		je enter_handler
+		cmp eax, 30h                ; EPT_VIOLATION
+		je enter_handler
+
+		; VMX instructions (VMCLEAR..VMXON = 13h..1Bh) — inject #UD
+		; Excludes VMCALL (12h) which Hyper-V handles for its own hypercalls
+		cmp eax, 13h
+		jb not_vmx_instr
+		cmp eax, 1Bh
+		jbe enter_handler
+	not_vmx_instr:
+
+		; Non-handled exit: restore scratch regs, skip to Hyper-V trampoline
+		pop rdx
+		pop rax
+		jmp original_vmexit_entry_trampoline
+
+	enter_handler:
+		; Restore scratch regs before full save (trap_frame needs correct values)
+		pop rdx
+		pop rax
+
+		; --- Original handler code ---
 		sub rsp, 80h
 
 		; save all GPRs matching trap_frame_t layout
@@ -64,6 +104,10 @@ extern original_vmexit_entry_trampoline : qword
 
 	handled:
 		vmresume
+		; vmresume failed — should never reach here (Fix F)
+		int 3
+		hlt
+		jmp $-2
 
 	vmexit_entry_hook_stub endp
 END
