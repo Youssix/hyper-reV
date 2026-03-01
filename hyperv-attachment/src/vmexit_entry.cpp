@@ -88,10 +88,10 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
         {
             on_hook_cr3_now = true;
         }
-        else if (!is_target && /* !hook3_active && */ entry_eptp.address_of_page_directory == hook_eptp.address_of_page_directory)
+        else if (!is_target && !hook3_active && entry_eptp.address_of_page_directory == hook_eptp.address_of_page_directory)
         {
             // Non-target process on hook_cr3 → swap back to hyperv_cr3 (prevent #PF on hidden region)
-            // TODO: re-enable !hook3_active guard once Option B source table patch works
+            // When Hook 3 active: all hooks use shadow code pages (kernel VA, all processes safe)
             cr3 restore = entry_eptp;
             restore.address_of_page_directory = slat::hyperv_cr3().address_of_page_directory;
             arch::set_slat_cr3(restore);
@@ -138,8 +138,8 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
         }
 
         // Not our MTF — fall through to Hyper-V (restore hyperv_cr3 first)
-        // TODO: re-enable !hook3_active guard once Option B source table patch works
-        if (on_hook_cr3_now /* && !hook3_active */)
+        // When Hook 3 active: stay on hook_cr3, HV handles MTF fine on shallow copy
+        if (on_hook_cr3_now && !hook3_active)
         {
             cr3 restore = arch::get_slat_cr3();
             restore.address_of_page_directory = slat::hyperv_cr3().address_of_page_directory;
@@ -300,9 +300,8 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
 
     // Not handled — fall through to Hyper-V via trampoline.
     // Restore hyperv_cr3 before falling through: HV must see its own EPTP.
-    // TODO: re-enable !hook3_active guard once Option B source table patch works
-    // (then HV's internal structures agree with hook_cr3 and no restore needed).
-    if (on_hook_cr3_now /* && !hook3_active */)
+    // When Hook 3 active: stay on hook_cr3, HvSetEptPointer shellcode handles EPTP.
+    if (on_hook_cr3_now && !hook3_active)
     {
         cr3 restore = arch::get_slat_cr3();
         restore.address_of_page_directory = slat::hyperv_cr3().address_of_page_directory;
