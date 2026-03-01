@@ -14,6 +14,6 @@ UINT64 hyperv_attachment_get_pages_needed();
 EFI_STATUS hyperv_attachment_do_heap_allocation(void** allocation_base_out, UINT64 pages_needed);
 EFI_STATUS hyperv_attachment_allocate_and_copy(UINT64 pages_needed);
 EFI_STATUS hyperv_attachment_get_relocated_entry_point(UINT8** hyperv_attachment_entry_point);
-void hyperv_attachment_invoke_entry_point(UINT8** detours_out, UINT8* hyperv_attachment_entry_point, CHAR8* original_vmexit_handler, UINT64 heap_physical_base, UINT64 heap_physical_usable_base, UINT64 heap_total_size, UINT64 uefi_boot_physical_base_address, UINT32 uefi_boot_image_size, CHAR8* get_vmcb_gadget, UINT64 vmexit_entry_trampoline);
+void hyperv_attachment_invoke_entry_point(UINT8** detours_out, UINT8* hyperv_attachment_entry_point, CHAR8* original_vmexit_handler, UINT64 heap_physical_base, UINT64 heap_physical_usable_base, UINT64 heap_total_size, UINT64 uefi_boot_physical_base_address, UINT32 uefi_boot_image_size, CHAR8* get_vmcb_gadget, UINT64 vmexit_entry_trampoline, UINT64 vmwrite_hook_cave_pa, UINT64 enlightened_vmcs_offsets);
 EFI_STATUS hyperv_attachment_load_and_delete_from_disk(UINT8** file_buffer_out);
 

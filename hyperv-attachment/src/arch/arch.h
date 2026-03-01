@@ -55,6 +55,15 @@ namespace arch
 
 	// Virtual-APIC page physical address (for reading guest CR8/TPR)
 	std::uint64_t get_virtual_apic_address();
+
+	// Enlightened VMCS offsets (from HvSetEptPointer sig scan at boot)
+	void set_enlightened_vmcs_offsets(std::uint64_t packed_offsets);
+	std::uint32_t get_enlightened_gs_per_vp_offset();
+	std::uint16_t get_enlightened_eptp_cache_offset();
+	std::uint16_t get_enlightened_clean_fields_offset();
+
+	// Diagnostic: read VMCS HOST_GS_BASE field (what hardware loads on VMEXIT)
+	std::uint64_t vmread_host_gs_base();
 #else
 	vmcb_t* get_vmcb();
 	void parse_vmcb_gadget(const std::uint8_t* get_vmcb_gadget);

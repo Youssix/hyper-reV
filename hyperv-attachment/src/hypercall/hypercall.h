@@ -9,5 +9,6 @@ namespace hypercall
 	void perform_process_cleanup();
 
 	void setup_hidden_region_boot();
+	void setup_shadow_code_pages();
 	std::uint64_t auto_setup_mmclean_hook();
 }

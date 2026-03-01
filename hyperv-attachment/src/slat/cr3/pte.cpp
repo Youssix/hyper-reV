@@ -1,4 +1,5 @@
 #include "pte.h"
+#include "cr3.h"
 #include "fork_registry.h"
 
 #include "../../memory_manager/memory_manager.h"
@@ -345,6 +346,8 @@ slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, c
 		fork_registry::register_forked_pdpt(gpa.pml4_idx, forked_pdpt_pfn, hook_pml4e->page_frame_number);
 
 		hook_pml4e->page_frame_number = forked_pdpt_pfn;
+
+		mark_all_lps_dirty();
 	}
 
 	// Now walk the (possibly forked) PDPT
@@ -387,6 +390,8 @@ slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, c
 		fork_registry::register_forked_pd(gpa.pml4_idx, gpa.pdpt_idx, forked_pd_pfn, hook_pdpte->page_frame_number);
 
 		hook_pdpte->page_frame_number = forked_pd_pfn;
+
+		mark_all_lps_dirty();
 	}
 
 	// Now walk the (possibly forked) PD
@@ -433,6 +438,8 @@ slat_pte* slat::fork_get_pte(const cr3 hook_cr3_val, const cr3 hyperv_cr3_val, c
 		fork_registry::register_forked_pt(gpa.pml4_idx, gpa.pdpt_idx, gpa.pd_idx, forked_pt_pfn, hook_pde->page_frame_number);
 
 		hook_pde->page_frame_number = forked_pt_pfn;
+
+		mark_all_lps_dirty();
 	}
 
 	return get_pte(hook_pde, gpa);

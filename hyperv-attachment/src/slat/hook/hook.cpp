@@ -150,6 +150,7 @@ std::uint64_t slat::hook::add(const virtual_address_t target_guest_physical_addr
 
 	hook_mutex.release();
 
+	mark_all_lps_dirty();
 	flush_all_logical_processors_cache();
 
 	return 1;
@@ -261,6 +262,7 @@ std::uint64_t slat::hook::remove(const virtual_address_t guest_physical_address)
 
 	hook_mutex.release();
 
+	mark_all_lps_dirty();
 	flush_all_logical_processors_cache();
 
 	return pte_cleanup_status;
@@ -281,5 +283,6 @@ void slat::hook::remove_all()
 
 	hook_mutex.release();
 
+	mark_all_lps_dirty();
 	flush_all_logical_processors_cache();
 }

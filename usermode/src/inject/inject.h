@@ -1901,7 +1901,8 @@ inline bool install_mmclean_hook(std::uint64_t target_eprocess)
 	if (!mmclean_va)
 		return false;
 
-	// Read prologue and find instruction boundary >= 14 (shadow page JMP size)
+	// V3 precheck (67B inline shellcode, zero VMEXIT). Boot hook already installed,
+	// reserved_data=29 re-arms with new target name/EPROCESS. Min displaced = 14 (abs JMP).
 	constexpr std::uint32_t min_displaced = 14;
 	std::uint8_t prologue[200]{};
 	hypercall::read_guest_virtual_memory(prologue, mmclean_va, sys::current_cr3, 200);
@@ -1917,7 +1918,7 @@ inline bool install_mmclean_hook(std::uint64_t target_eprocess)
 		return false;
 	}
 
-	std::println("[+] Displacing {} bytes for 14-byte JMP redirect", displaced);
+	std::println("[+] Displacing {} bytes for V3 precheck hook", displaced);
 
 	std::uint64_t result = hypercall::setup_mmclean_inline_hook(mmclean_va, target_eprocess, displaced);
 	if (result != 1)
@@ -1978,8 +1979,9 @@ inline bool install_mmaf_cpp_hook(std::uint64_t clone_cr3, std::uint64_t hidden_
 
 	std::println("[+] MmAccessFault VA: 0x{:X} (C++ EPT hook)", mmaf_va);
 
-	// Read prologue and find instruction boundary >= 14 (shadow page JMP size)
-	constexpr std::uint32_t min_displaced = 14;
+	// Read prologue and find instruction boundary >= 35 (35B stub filter with CR3 PFN check)
+	// Stub filter REQUIRED: see MmClean comment
+	constexpr std::uint32_t min_displaced = 35;
 	std::uint8_t prologue[200]{};
 	hypercall::read_guest_virtual_memory(prologue, mmaf_va, sys::current_cr3, 200);
 
@@ -1994,7 +1996,7 @@ inline bool install_mmaf_cpp_hook(std::uint64_t clone_cr3, std::uint64_t hidden_
 		return false;
 	}
 
-	std::println("[+] Displacing {} bytes for 14-byte JMP redirect", displaced);
+	std::println("[+] Displacing {} bytes for 35-byte stub filter redirect", displaced);
 
 	std::uint64_t result = hypercall::setup_mmaf_inline_hook(
 		mmaf_va, clone_cr3, displaced, static_cast<std::uint8_t>(hidden_pml4_index));
@@ -2938,7 +2940,8 @@ inline std::pair<std::uint64_t, std::uint64_t> install_safe_probe_stubs(
 // Main injection entry point
 //=============================================================================
 
-inline bool inject_dll(const std::string& dll_path, const std::string& process_name)
+inline bool inject_dll(const std::string& dll_path, const std::string& process_name,
+	std::vector<uint8_t>* preloaded_data = nullptr)
 {
 	// cleanup any stale CR3 intercept from previous run
 	hypercall::disable_cr3_intercept();
@@ -2974,7 +2977,7 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 
 	std::println("[+] CR3 intercept enabled");
 
-	// 4. Load DLL from disk
+	// 4. Load DLL from disk (or use preloaded data)
 	// NOTE: From this point on, any failure must go through cleanup_partial_injection
 	// to disable CR3 intercept + remove any hooks installed so far.
 	// Leaving cr3_intercept::enabled without cleanup causes SECURE_KERNEL_ERROR
@@ -2997,7 +3000,11 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 	std::vector<std::uint64_t> hidden_page_pas; // PA for each hidden page (for physical writes)
 
 	std::vector<uint8_t> dll_image;
-	if (!load_dll_file(dll_path, dll_image))
+	if (preloaded_data)
+	{
+		dll_image = std::move(*preloaded_data);
+	}
+	else if (!load_dll_file(dll_path, dll_image))
 	{
 		std::println("[-] Failed to load DLL: {}", dll_path);
 		goto cleanup_partial_injection;
@@ -3080,14 +3087,18 @@ inline bool inject_dll(const std::string& dll_path, const std::string& process_n
 		std::println("[!] WARNING: UserDirectoryTableBase offset not resolved from PDB — KPTI interception disabled");
 	}
 
-	// 6c. KiPageFault inline EPT hook — DISABLED for bisect testing.
-	// Per-VMEXIT CR3 swap alone should handle context switches. Re-enable after
-	// confirming CR3 swap works without freeze.
-	// if (install_page_fault_hook(static_cast<std::uint8_t>(hidden_pml4_index)))
-	// {
-	//     std::println("[+] Hidden memory #PF safety net active (zero-VMEXIT inline handler)");
-	// }
-	std::println("[*] KiPageFault disabled (bisect) — per-VMEXIT CR3 swap is the only safety net");
+	// 6c. KiPageFault inline EPT hook — zero-VMEXIT safety net for hidden memory #PF.
+	// Intercepts #PF on PML4[hidden] at IDT level, swaps CR3 to clone, retries.
+	// Also eliminates need for MmAccessFault hook (KiPageFault handles it earlier).
+	// (was: DISABLED for bisect testing — re-enabled after double fault BSOD confirmed need)
+	if (install_page_fault_hook(static_cast<std::uint8_t>(hidden_pml4_index)))
+	{
+	    std::println("[+] Hidden memory #PF safety net active (zero-VMEXIT inline handler)");
+	}
+	else
+	{
+	    std::println("[!] WARNING: KiPageFault hook failed — hidden memory faults will BSOD");
+	}
 
 	// 7. Relocate image
 	if (!relocate_image((PVOID)hidden_base_va, dll_image.data(), nt_headers))

@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <Windows.h>
 
 namespace app
 {
@@ -20,6 +21,9 @@ namespace app
 		// dashboard
 		int selected_game = 0;
 		bool spoofer_enabled = false;
+
+		// target process handle (for heartbeat kill)
+		HANDLE target_process_handle = nullptr;
 	};
 
 	void initialize();

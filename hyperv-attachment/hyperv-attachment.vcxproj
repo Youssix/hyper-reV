@@ -187,6 +187,7 @@
     <ClCompile Include="src\slat\cr3\deep_copy.cpp" />
     <ClCompile Include="src\slat\cr3\pte.cpp" />
     <ClCompile Include="src\slat\cr3\fork_registry.cpp" />
+    <ClCompile Include="src\slat\shadow_code\shadow_code.cpp" />
     <ClCompile Include="src\slat\violation\violation.cpp" />
     <ClCompile Include="src\slat\violation\mtf_context.cpp" />
     <ClCompile Include="src\vmexit_entry.cpp" />
@@ -216,8 +217,10 @@
     <ClInclude Include="src\slat\slat_def.h" />
     <ClInclude Include="src\slat\cr3\pte.h" />
     <ClInclude Include="src\slat\cr3\fork_registry.h" />
+    <ClInclude Include="src\slat\shadow_code\shadow_code.h" />
     <ClInclude Include="src\slat\violation\violation.h" />
     <ClInclude Include="src\slat\violation\mtf_context.h" />
+    <ClInclude Include="src\logs\serial.h" />
     <ClInclude Include="src\structures\virtual_address.h" />
   </ItemGroup>
   <ItemGroup>

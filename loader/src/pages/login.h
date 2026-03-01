@@ -22,6 +22,7 @@ private:
 	char m_key_buf[256] = {};
 	char m_username_buf[128] = {};
 	char m_password_buf[128] = {};
+	bool m_show_password = false;
 
 	std::string m_error;
 	bool m_logging_in = false;

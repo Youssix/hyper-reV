@@ -12,9 +12,9 @@ enum class game_status
 
 struct game_info_t
 {
+	std::string id;           // server game_id (e.g. "fc26premium")
 	std::string name;
 	std::string process_name;
-	std::string dll_path;
 	std::string version;
 	game_status status = game_status::offline;
 };

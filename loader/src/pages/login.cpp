@@ -1,27 +1,17 @@
 #include "login.h"
 #include "../app.h"
 #include "../auth/auth_client.h"
+#include "../security/integrity.h"
 #include "../renderer/renderer.h"
 #include "../renderer/anim.h"
+#include "../renderer/theme.h"
+#include "../renderer/widgets.h"
+#include "../vendor/IconsFontAwesome6.h"
 
 #include <imgui.h>
 #include <shellapi.h>
 #include <future>
 #include <algorithm>
-
-static const ImU32 U32_ACCENT   = IM_COL32(255, 107, 0, 255);
-static const ImU32 U32_ACCENT50 = IM_COL32(255, 107, 0, 50);
-static const ImVec4 COL_ACCENT  = ImVec4(1.0f, 0.42f, 0.0f, 1.0f);
-static const ImVec4 COL_DIM     = ImVec4(0.48f, 0.48f, 0.55f, 1.0f);
-static const ImVec4 COL_RED     = ImVec4(1.0f, 0.28f, 0.28f, 1.0f);
-static const ImVec4 COL_TEXT    = ImVec4(0.92f, 0.92f, 0.95f, 1.0f);
-
-static void draw_accent_line(float x1, float x2, float y, float thickness = 2.0f)
-{
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	ImVec2 wp = ImGui::GetWindowPos();
-	dl->AddLine(ImVec2(wp.x + x1, wp.y + y), ImVec2(wp.x + x2, wp.y + y), U32_ACCENT, thickness);
-}
 
 void LoginPage::on_enter()
 {
@@ -71,6 +61,13 @@ void LoginPage::do_login()
 {
 	if (m_logging_in) return;
 
+	// pre-auth integrity gate: verify binary not tampered before sending credentials
+	if (!integrity::verify_all())
+	{
+		auth::send_report("", "pre_auth_tamper", "Integrity check failed before auth");
+		TerminateProcess(GetCurrentProcess(), 1);
+	}
+
 	if (m_tab == 0)
 	{
 		std::string key = m_key_buf;
@@ -90,6 +87,22 @@ void LoginPage::do_login()
 
 			if (result.success)
 			{
+				// post-auth: telemetry
+				if (!auth::send_telemetry(result.session.token))
+				{
+					m_error = "Account is blacklisted or telemetry failed";
+					s.authenticated = false;
+					return;
+				}
+
+				// post-auth: verify loader integrity
+				if (!auth::verify_loader(result.session.token))
+				{
+					m_error = "Loader integrity check failed. Please re-download.";
+					s.authenticated = false;
+					return;
+				}
+
 				s.session = result.session;
 				s.authenticated = true;
 
@@ -126,6 +139,22 @@ void LoginPage::do_login()
 
 			if (result.success)
 			{
+				// post-auth: telemetry
+				if (!auth::send_telemetry(result.session.token))
+				{
+					m_error = "Account is blacklisted or telemetry failed";
+					s.authenticated = false;
+					return;
+				}
+
+				// post-auth: verify loader integrity
+				if (!auth::verify_loader(result.session.token))
+				{
+					m_error = "Loader integrity check failed. Please re-download.";
+					s.authenticated = false;
+					return;
+				}
+
 				s.session = result.session;
 				s.authenticated = true;
 
@@ -149,7 +178,7 @@ void LoginPage::render()
 	auto& state = app::state();
 	const float W = (float)renderer::WINDOW_WIDTH;
 	const float H = (float)renderer::WINDOW_HEIGHT;
-	const float TITLE_H = 44.0f;
+	const float TITLE_H = renderer::TITLE_BAR_HEIGHT;
 	float page_alpha = anim::fade_in(m_enter_time, 0.3f);
 
 	ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -161,28 +190,7 @@ void LoginPage::render()
 		ImGuiWindowFlags_NoScrollbar);
 
 	// === title bar ===
-	float title_font_h = renderer::font_title()->FontSize;
-	float title_y = (TITLE_H - title_font_h) * 0.5f;
-	float btn_h = 28.0f;
-	float btn_y = (TITLE_H - btn_h) * 0.5f;
-
-	// ZEROHOOK with glow pulse
-	float glow_alpha = anim::pulse_range(0.7f, 1.0f, 1.5f);
-	ImGui::SetCursorPos(ImVec2(20, title_y));
-	ImGui::PushFont(renderer::font_title());
-	ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.0f, glow_alpha), "ZEROHOOK");
-	ImGui::PopFont();
-
-	ImGui::SetCursorPos(ImVec2(W - 72, btn_y));
-	if (ImGui::Button(" _ ##min", ImVec2(30, btn_h)))
-		ShowWindow(renderer::get_hwnd(), SW_MINIMIZE);
-	ImGui::SameLine(0, 4);
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.15f, 0.15f, 1.0f));
-	if (ImGui::Button(" X ##close", ImVec2(30, btn_h)))
-		renderer::request_close();
-	ImGui::PopStyleColor();
-
-	draw_accent_line(0, W, TITLE_H, 2.0f);
+	widgets::render_title_bar(m_enter_time);
 
 	// === handle deferred key removal ===
 	if (m_key_to_remove >= 0)
@@ -198,24 +206,24 @@ void LoginPage::render()
 
 	// === login card with slide-up + fade ===
 	float card_w = 420.0f;
-	float card_h = m_tab == 0 ? 340.0f : 390.0f;
+	float card_h = m_tab == 0 ? 340.0f : 420.0f;
 	float card_x = (W - card_w) * 0.5f;
 	float card_base_y = (H - card_h) * 0.5f - 10;
 	float card_slide = anim::slide_in(m_enter_time, 30.0f, 0.4f);
 	float card_y = card_base_y + card_slide;
 
 	ImGui::SetCursorPos(ImVec2(card_x, card_y));
-	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.065f, 0.065f, 0.09f, 1.0f));
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::card_bg);
 	ImGui::BeginChild("##login_card", ImVec2(card_w, card_h), ImGuiChildFlags_None);
 
 	// accent top edge + shimmer
 	{
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		ImVec2 wp = ImGui::GetWindowPos();
-		dl->AddRectFilled(wp, ImVec2(wp.x + card_w, wp.y + 2), U32_ACCENT);
+		dl->AddRectFilled(wp, ImVec2(wp.x + card_w, wp.y + 2), theme::accent_u32);
 		dl->AddRectFilledMultiColor(
 			ImVec2(wp.x, wp.y + 2), ImVec2(wp.x + card_w, wp.y + 12),
-			U32_ACCENT50, U32_ACCENT50, IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0));
+			theme::accent_u32_50, theme::accent_u32_50, IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0));
 
 		// shimmer sweep
 		float sx = anim::shimmer_x(card_w, 0.4f, m_enter_time);
@@ -234,11 +242,11 @@ void LoginPage::render()
 
 	ImGui::SetCursorPos(ImVec2(32, 22));
 	ImGui::PushFont(renderer::font_title());
-	ImGui::TextColored(COL_TEXT, "Login");
+	ImGui::TextColored(theme::text_primary, "Login");
 	ImGui::PopFont();
 
 	ImGui::SetCursorPos(ImVec2(32, 50));
-	ImGui::TextColored(COL_DIM, "Authenticate to access the dashboard");
+	ImGui::TextColored(theme::text_dim, "Authenticate to access the dashboard");
 	ImGui::PopStyleVar();
 
 	// === tab bar with stagger ===
@@ -255,8 +263,8 @@ void LoginPage::render()
 	{
 		bool active = (m_tab == 0);
 		ImGui::PushStyleColor(ImGuiCol_Button, active ? ImVec4(1.0f, 0.42f, 0.0f, 0.15f) : ImVec4(0.08f, 0.08f, 0.12f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_Text, active ? COL_ACCENT : COL_DIM);
-		if (ImGui::Button("License Key", ImVec2(tab_w, 30)))
+		ImGui::PushStyleColor(ImGuiCol_Text, active ? theme::accent : theme::text_dim);
+		if (ImGui::Button(ICON_FA_KEY " License Key", ImVec2(tab_w, 30)))
 		{
 			m_tab = 0;
 			m_error.clear();
@@ -270,7 +278,7 @@ void LoginPage::render()
 			dl->AddRectFilled(
 				ImVec2(wp.x + 32, wp.y + tab_y + 30),
 				ImVec2(wp.x + 32 + tab_w, wp.y + tab_y + 32),
-				U32_ACCENT);
+				theme::accent_u32);
 		}
 	}
 
@@ -280,8 +288,8 @@ void LoginPage::render()
 	{
 		bool active = (m_tab == 1);
 		ImGui::PushStyleColor(ImGuiCol_Button, active ? ImVec4(1.0f, 0.42f, 0.0f, 0.15f) : ImVec4(0.08f, 0.08f, 0.12f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_Text, active ? COL_ACCENT : COL_DIM);
-		if (ImGui::Button("Account", ImVec2(tab_w, 30)))
+		ImGui::PushStyleColor(ImGuiCol_Text, active ? theme::accent : theme::text_dim);
+		if (ImGui::Button(ICON_FA_USER " Account", ImVec2(tab_w, 30)))
 		{
 			m_tab = 1;
 			m_error.clear();
@@ -296,7 +304,7 @@ void LoginPage::render()
 			dl->AddRectFilled(
 				ImVec2(wp.x + x0, wp.y + tab_y + 30),
 				ImVec2(wp.x + x0 + tab_w, wp.y + tab_y + 32),
-				U32_ACCENT);
+				theme::accent_u32);
 		}
 	}
 
@@ -312,32 +320,25 @@ void LoginPage::render()
 	float field_w = card_w - 64;
 	bool enter_pressed = false;
 
-	// input field styling
-	ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.06f, 0.06f, 0.10f, 1.0f));
-	ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.08f, 0.08f, 0.14f, 1.0f));
-	ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.08f, 0.08f, 0.14f, 1.0f));
-
 	if (m_tab == 0)
 	{
 		// === License Key tab ===
 		ImGui::SetCursorPosX(32);
-		ImGui::TextColored(COL_DIM, "License Key");
+		ImGui::TextColored(theme::text_dim, "License Key");
 
-		float dropdown_btn_w = 28.0f;
-		float input_w = field_w - dropdown_btn_w - 4;
+		float dropdown_btn_w = m_saved.keys.empty() ? 0.0f : 28.0f;
+		float input_w = field_w - dropdown_btn_w - (dropdown_btn_w > 0 ? 4.0f : 0.0f);
 
 		ImGui::SetCursorPosX(32);
-		ImGui::PushItemWidth(input_w);
-		enter_pressed = ImGui::InputText("##key", m_key_buf, sizeof(m_key_buf),
-			ImGuiInputTextFlags_EnterReturnsTrue);
-		ImGui::PopItemWidth();
+		enter_pressed = widgets::icon_input(ICON_FA_KEY, "##key", m_key_buf, sizeof(m_key_buf),
+			input_w, ImGuiInputTextFlags_EnterReturnsTrue);
 
 		if (!m_saved.keys.empty())
 		{
 			ImGui::SameLine(0, 4);
 			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.08f, 0.14f, 1.0f));
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.12f, 0.20f, 1.0f));
-			if (ImGui::Button("v##dropdown", ImVec2(dropdown_btn_w, 0)))
+			if (ImGui::Button(ICON_FA_CHEVRON_DOWN "##dropdown", ImVec2(dropdown_btn_w, 0)))
 				m_show_key_dropdown = !m_show_key_dropdown;
 			ImGui::PopStyleColor(2);
 		}
@@ -377,7 +378,7 @@ void LoginPage::render()
 				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
 				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.15f, 0.15f, 0.5f));
 				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.3f, 0.3f, 1.0f));
-				if (ImGui::Button("x##rm", ImVec2(20, 22)))
+				if (ImGui::Button(ICON_FA_XMARK "##rm", ImVec2(20, 22)))
 					m_key_to_remove = i;
 				ImGui::PopStyleColor(3);
 
@@ -394,33 +395,33 @@ void LoginPage::render()
 		bool has_saved_account = !m_saved.username.empty();
 
 		ImGui::SetCursorPosX(32);
-		ImGui::TextColored(COL_DIM, "Username");
+		ImGui::TextColored(theme::text_dim, "Username");
 		if (has_saved_account)
 		{
 			ImGui::SameLine(0, 8);
 			ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.4f, 0.7f), "(saved)");
 		}
 		ImGui::SetCursorPosX(32);
-		ImGui::PushItemWidth(field_w);
-		ImGui::InputText("##user", m_username_buf, sizeof(m_username_buf));
-		ImGui::PopItemWidth();
+		widgets::icon_input(ICON_FA_USER, "##user", m_username_buf, sizeof(m_username_buf), field_w);
 
 		ImGui::Spacing();
 		ImGui::SetCursorPosX(32);
-		ImGui::TextColored(COL_DIM, "Password");
+		ImGui::TextColored(theme::text_dim, "Password");
 		if (has_saved_account)
 		{
 			ImGui::SameLine(0, 8);
 			ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.4f, 0.7f), "(saved)");
 		}
 		ImGui::SetCursorPosX(32);
-		ImGui::PushItemWidth(field_w);
-		enter_pressed = ImGui::InputText("##pass", m_password_buf, sizeof(m_password_buf),
-			ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
-		ImGui::PopItemWidth();
-	}
+		enter_pressed = widgets::password_input("##pass", m_password_buf, sizeof(m_password_buf),
+			field_w, &m_show_password);
 
-	ImGui::PopStyleColor(3); // frame bg colors
+		// Forgot Password / Create Account links
+		ImGui::SetCursorPosX(32);
+		widgets::link_button("Forgot Password?", theme::link_color, "https://zerohook.gg/forgot-password");
+		ImGui::SameLine(0, 16);
+		widgets::link_button("Create Account", theme::link_color, "https://zerohook.gg/register");
+	}
 
 	ImGui::Spacing();
 
@@ -463,32 +464,20 @@ void LoginPage::render()
 	ImGui::PushStyleVar(ImGuiStyleVar_Alpha, btn_alpha);
 
 	float login_btn_w = 180.0f;
-	float login_btn_h = 36.0f;
 	ImGui::SetCursorPosX((card_w - login_btn_w) * 0.5f);
 
-	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 0.42f, 0.0f, 1.0f));
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.55f, 0.16f, 1.0f));
-	ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.8f, 0.33f, 0.0f, 1.0f));
-	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-
-	if ((ImGui::Button("Login", ImVec2(login_btn_w, login_btn_h)) || enter_pressed) && !m_logging_in)
+	if ((widgets::accent_button(ICON_FA_ARROW_RIGHT " Login", ImVec2(login_btn_w, 36)) || enter_pressed) && !m_logging_in)
 		do_login();
 
-	ImGui::PopStyleColor(4);
 	ImGui::PopStyleVar(); // btn alpha
 
 	if (m_logging_in)
 	{
 		ImGui::EndDisabled();
 		ImGui::Spacing();
-		// animated dots for loading
-		int dots = ((int)(anim::time() * 3.0f)) % 4;
-		const char* dot_str[] = { "", ".", "..", "..." };
-		char auth_text[32];
-		snprintf(auth_text, sizeof(auth_text), "Authenticating%s", dot_str[dots]);
-		float auth_w = ImGui::CalcTextSize(auth_text).x;
-		ImGui::SetCursorPosX((card_w - auth_w) * 0.5f);
-		ImGui::TextColored(COL_ACCENT, "%s", auth_text);
+		float spinner_w = 8.0f * 2 + 8 + ImGui::CalcTextSize("Authenticating").x;
+		ImGui::SetCursorPosX((card_w - spinner_w) * 0.5f);
+		widgets::spinner("Authenticating");
 	}
 
 	if (!m_error.empty())
@@ -499,7 +488,7 @@ void LoginPage::render()
 		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, err_alpha);
 		ImGui::SetCursorPosX(32);
 		ImGui::PushTextWrapPos(card_w - 32);
-		ImGui::TextColored(COL_RED, "%s", m_error.c_str());
+		ImGui::TextColored(theme::red, "%s", m_error.c_str());
 		ImGui::PopTextWrapPos();
 		ImGui::PopStyleVar();
 	}
@@ -508,19 +497,7 @@ void LoginPage::render()
 	ImGui::PopStyleColor();
 
 	// === footer ===
-	float footer_y = H - 32;
-
-	ImGui::SetCursorPos(ImVec2(20, footer_y + 6));
-	ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.0f, 0.6f), "ZeroHook.gg");
-
-	float discord_w = ImGui::CalcTextSize("Discord").x + 24;
-	ImGui::SetCursorPos(ImVec2(W - discord_w - 16, footer_y + 2));
-	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.4f, 0.95f, 0.2f));
-	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.5f, 1.0f, 0.8f));
-	if (ImGui::Button("Discord"))
-		ShellExecuteA(nullptr, "open", "https://discord.gg/zerohook", nullptr, nullptr, SW_SHOWNORMAL);
-	ImGui::PopStyleColor(3);
+	widgets::render_footer();
 
 	renderer::draw_window_border();
 

@@ -1048,6 +1048,12 @@ void process_injectdll(CLI::App* injectdll)
 	if (result)
 	{
 		std::println("[+] Injection successful!");
+
+		// Activate Hook 3 (VMWRITE EPTP redirect) — safe now, full inject flow complete
+		if (hypercall::activate_vmwrite_hook(true))
+			std::println("[+] Hook 3 (VMWRITE redirect) activated — VP locked on hook_cr3");
+		else
+			std::println("[!] Hook 3 activation failed (cave PA not set?)");
 	}
 	else
 	{
@@ -1079,6 +1085,7 @@ void process_hookstatus(CLI::App* hookstatus)
 	std::println("    cr3_swaps:        {}", hypercall::read_cr3_swap_count());
 	std::println("    ept_violations:   {}", hypercall::read_slat_violation_count());
 	std::println("    mmaf_hits:        {}", hypercall::read_mmaf_hit_count());
+	std::println("    mmaf_total:       {}", hypercall::read_mmaf_total_count());
 	std::println("    cleanup_count:    {}", hypercall::read_cleanup_count());
 	std::println("    hijack_cpuid:     {}", hypercall::read_hijack_cpuid_count());
 	std::println("    hijack_claimed:   {}", hypercall::read_hijack_claimed_count());
@@ -1121,6 +1128,405 @@ void process_boothook(CLI::App* boothook)
 	std::println("    hook_hits:        {} (armed+fn ok)", hit_count);
 	std::println("    hook_matches:     {} (name match)", match_count);
 	std::println("    cleanup_count:    {}", hypercall::read_cleanup_count());
+}
+
+//=============================================================================
+// hookdiag — EPT hook byte verification
+//=============================================================================
+
+CLI::App* init_hookdiag(CLI::App& app)
+{
+	return app.add_subcommand("hookdiag", "dump EPT hook diagnostics: shadow vs original bytes, PTE state")->ignore_case();
+}
+
+void process_hookdiag(CLI::App* hookdiag)
+{
+	if (!hookdiag->parsed()) return;
+
+	// Field 0: triggers serial dump + returns summary
+	const std::uint64_t summary = hypercall::hookdiag(0);
+	const std::uint64_t hook_count = summary & 0xFF;
+	const bool shadow_code_init = (summary >> 8) & 1;
+	const bool mmclean_active = (summary >> 9) & 1;
+	const bool armed = (summary >> 10) & 1;
+
+	std::println("[+] Hook Diagnostics (also dumped to COM1 serial)");
+	std::println("    hook_count:       {}", hook_count);
+	std::println("    shadow_code:      {}", shadow_code_init ? "YES" : "NO");
+	std::println("    mmclean_active:   {}", mmclean_active ? "YES" : "NO");
+	std::println("    armed:            {}", armed ? "YES" : "NO");
+
+	if (hook_count == 0)
+	{
+		std::println("    (no EPT hooks installed)");
+		return;
+	}
+
+	for (std::uint64_t i = 0; i < hook_count && i < 32; i++)
+	{
+		const std::uint64_t base = 1 + i * 8;
+		const std::uint64_t orig_pfn = hypercall::hookdiag(base + 0);
+		const std::uint64_t shadow_info = hypercall::hookdiag(base + 1);
+		const std::uint64_t meta = hypercall::hookdiag(base + 2);
+		const std::uint64_t shadow_bytes0 = hypercall::hookdiag(base + 3);
+		const std::uint64_t shadow_bytes1 = hypercall::hookdiag(base + 4);
+		const std::uint64_t orig_bytes0 = hypercall::hookdiag(base + 5);
+		const std::uint64_t orig_bytes1 = hypercall::hookdiag(base + 6);
+		const std::uint64_t validation = hypercall::hookdiag(base + 7);
+
+		const std::uint64_t shadow_pfn = shadow_info & 0xFFFFFFFFFull;
+		const bool pte_r = (shadow_info >> 36) & 1;
+		const bool pte_w = (shadow_info >> 37) & 1;
+		const bool pte_x = (shadow_info >> 38) & 1;
+
+		const std::uint64_t hook_off = meta & 0xFFF;
+		const std::uint64_t hook_len = (meta >> 12) & 0xFF;
+		const bool is_shadow_code = (meta >> 20) & 1;
+
+		std::println("");
+		std::println("    --- Hook #{} ---", i);
+		std::println("    original_pfn:  0x{:X}  (GPA 0x{:X})", orig_pfn, orig_pfn << 12);
+		std::println("    shadow_pfn:    0x{:X}  (GPA 0x{:X})", shadow_pfn, shadow_pfn << 12);
+		std::println("    PTE:           R={} W={} X={}  {}", pte_r ? 1 : 0, pte_w ? 1 : 0, pte_x ? 1 : 0,
+			(!pte_r && !pte_w && pte_x) ? "[OK --X]" : "[FAIL expected --X]");
+		std::println("    hook_offset:   0x{:X}  length: {}", hook_off, hook_len);
+		std::println("    shadow_code:   {}", is_shadow_code ? "YES" : "NO");
+
+		// Print shadow bytes
+		auto print_bytes = [](const char* label, std::uint64_t b0, std::uint64_t b1) {
+			std::print("    {} ", label);
+			for (int b = 0; b < 8; b++)
+				std::print("{:02X} ", static_cast<unsigned>((b0 >> (b * 8)) & 0xFF));
+			for (int b = 0; b < 8; b++)
+				std::print("{:02X} ", static_cast<unsigned>((b1 >> (b * 8)) & 0xFF));
+			std::println("");
+		};
+
+		print_bytes("SHADOW:  ", shadow_bytes0, shadow_bytes1);
+		print_bytes("ORIGINAL:", orig_bytes0, orig_bytes1);
+
+		// Validation
+		const bool v_pte = (validation & 1);
+		const bool v_pfn = (validation & 2);
+		const bool v_bytes = (validation & 4);
+		std::println("    VALIDATION:    PTE={}  PFN_DIFF={}  BYTES_DIFF={}  {}",
+			v_pte ? "OK" : "FAIL", v_pfn ? "OK" : "FAIL", v_bytes ? "OK" : "FAIL",
+			(v_pte && v_pfn && v_bytes) ? "[ALL OK]" : "[ISSUES DETECTED]");
+	}
+}
+
+//=============================================================================
+// External stealth mode — attach to a process for stealth R/W via clone CR3.
+// Anticheat reads via original CR3 (clean bytes), target runs on clone (our mods).
+//=============================================================================
+
+// Track the externally attached process for display and detach
+namespace external
+{
+	inline bool attached = false;
+	inline std::string process_name;
+	inline std::uint64_t process_cr3 = 0;
+	inline std::uint64_t cloned_cr3 = 0;
+	inline std::uint64_t user_dtb = 0;
+}
+
+// extern <process_name> — attach to a process for external stealth R/W
+CLI::App* init_xtern(CLI::App& app)
+{
+	auto* cmd = app.add_subcommand("extern", "attach to a process for external stealth R/W (clone CR3)")->ignore_case();
+	cmd->add_option("process_name", "target process name (e.g. notepad.exe)")->required();
+	return cmd;
+}
+
+void process_xtern(CLI::App* ext)
+{
+	if (!ext->parsed()) return;
+
+	const std::string name = ext->get_option("process_name")->as<std::string>();
+
+	// 1. Clean up any stale state
+	if (external::attached)
+	{
+		hypercall::clear_user_cr3();
+		hypercall::disable_cr3_intercept();
+		external::attached = false;
+		std::println("[*] detached from previous process");
+	}
+
+	// 2. Find the process
+	auto process = sys::process::find_process_by_name(name);
+	if (!process.has_value())
+	{
+		std::println("[-] process '{}' not found", name);
+		return;
+	}
+	std::println("[+] found {} (PID: {}, CR3: 0x{:X}, EPROCESS: 0x{:X})",
+		process->name, process->pid, process->cr3, process->eprocess);
+
+	// 3. Clone the process CR3 (shallow copy of PML4)
+	const std::uint64_t cloned = hypercall::clone_guest_cr3(process->cr3);
+	if (cloned == 0)
+	{
+		std::println("[-] failed to clone CR3");
+		return;
+	}
+	std::println("[+] cloned CR3: 0x{:X}", cloned);
+
+	// 4. Enable CR3 intercept — all context switches to this process now use the clone
+	if (hypercall::enable_cr3_intercept(process->cr3, cloned) == 0)
+	{
+		std::println("[-] failed to enable CR3 intercept");
+		return;
+	}
+	std::println("[+] CR3 intercept enabled");
+
+	// 5. Register UserDirectoryTableBase for KPTI interception
+	// Without this, kernel→user transitions revert CR3 to original (bypasses our clone)
+	std::uint64_t user_dtb_val = 0;
+	if (sys::offsets::kprocess_user_directory_table_base != 0)
+	{
+		hypercall::read_guest_virtual_memory(&user_dtb_val,
+			process->eprocess + sys::offsets::kprocess_user_directory_table_base,
+			sys::current_cr3, 8);
+
+		if (user_dtb_val != 0)
+		{
+			hypercall::set_user_cr3(user_dtb_val);
+			std::println("[+] UserDTB registered: 0x{:X}", user_dtb_val);
+		}
+		else
+		{
+			std::println("[!] WARNING: UserDTB is 0 — KPTI interception disabled");
+		}
+	}
+
+	// 6. Save state
+	external::attached = true;
+	external::process_name = process->name;
+	external::process_cr3 = process->cr3;
+	external::cloned_cr3 = cloned;
+	external::user_dtb = user_dtb_val;
+
+	std::println("[+] external attached to {} — use cwrite/cread to stealth R/W", process->name);
+}
+
+// detach — disconnect from the externally attached process
+CLI::App* init_detach(CLI::App& app)
+{
+	auto* cmd = app.add_subcommand("detach", "detach from external stealth R/W session")->ignore_case();
+	return cmd;
+}
+
+void process_detach(CLI::App* /*detach*/)
+{
+	if (!external::attached)
+	{
+		std::println("[-] not attached to any process");
+		return;
+	}
+
+	// 1. Clear UserDTB interception
+	if (external::user_dtb != 0)
+	{
+		hypercall::clear_user_cr3();
+		std::println("[*] UserDTB interception cleared");
+	}
+
+	// 2. Disable CR3 intercept — process reverts to original CR3
+	hypercall::disable_cr3_intercept();
+	std::println("[*] CR3 intercept disabled");
+
+	// 3. Clear state
+	const std::string name = external::process_name;
+	external::attached = false;
+	external::process_name.clear();
+	external::process_cr3 = 0;
+	external::cloned_cr3 = 0;
+	external::user_dtb = 0;
+
+	std::println("[+] detached from {}", name);
+}
+
+// cwrite <va> <byte1> [byte2] [byte3] ... — stealth write bytes into clone CR3 (auto-shadows)
+CLI::App* init_cwrite(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	auto* cmd = app.add_subcommand("cwrite", "stealth write bytes into clone CR3 (auto-shadows the page)")->ignore_case();
+	add_transformed_command_option(cmd, "virtual_address", aliases_transformer)->required();
+	cmd->add_option("bytes", "hex bytes to write (e.g. 90 90 90 90)")->required()->expected(-1);
+	return cmd;
+}
+
+void process_cwrite(CLI::App* cwrite)
+{
+	const std::uint64_t va = get_command_option<std::uint64_t>(cwrite, "virtual_address");
+	const auto byte_strings = cwrite->get_option("bytes")->as<std::vector<std::string>>();
+
+	// Parse hex byte strings into a buffer
+	std::vector<std::uint8_t> bytes;
+	for (const auto& s : byte_strings)
+	{
+		bytes.push_back(static_cast<std::uint8_t>(std::stoull(s, nullptr, 16)));
+	}
+
+	if (bytes.empty())
+	{
+		std::println("[-] no bytes specified");
+		return;
+	}
+
+	const std::uint64_t written = hypercall::WriteCloneVirtualMemory(bytes.data(), va, bytes.size());
+
+	if (written == bytes.size())
+		std::println("[+] wrote {} bytes to clone @ 0x{:X}", written, va);
+	else
+		std::println("[-] partial write: {}/{} bytes at 0x{:X}", written, bytes.size(), va);
+}
+
+// cread <va> <size> — read memory via clone CR3 (what the target actually sees)
+CLI::App* init_cread(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	auto* cmd = app.add_subcommand("cread", "read memory via clone CR3 (what the target sees)")->ignore_case();
+	add_transformed_command_option(cmd, "virtual_address", aliases_transformer)->required();
+	add_command_option(cmd, "size")->required();
+	return cmd;
+}
+
+void process_cread(CLI::App* cread)
+{
+	const std::uint64_t va = get_command_option<std::uint64_t>(cread, "virtual_address");
+	const std::uint64_t size = get_command_option<std::uint64_t>(cread, "size");
+
+	if (size == 0 || size > 4096)
+	{
+		std::println("[-] invalid size (1-4096)");
+		return;
+	}
+
+	std::vector<std::uint8_t> buffer(size, 0);
+	const std::uint64_t bytes_read = hypercall::ReadCloneVirtualMemory(buffer.data(), va, size);
+
+	if (bytes_read == 0)
+	{
+		std::println("[-] failed to read from clone @ 0x{:X}", va);
+		return;
+	}
+
+	// Print hex dump
+	std::print("[+] clone @ 0x{:X} ({} bytes): ", va, bytes_read);
+	for (std::uint64_t i = 0; i < bytes_read; i++)
+		std::print("{:02X} ", buffer[i]);
+	std::println("");
+}
+
+// cshadow <va> — manually shadow (fork) a page in the clone CR3
+CLI::App* init_cshadow(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	auto* cmd = app.add_subcommand("cshadow", "shadow (fork) a guest page in clone CR3")->ignore_case();
+	add_transformed_command_option(cmd, "virtual_address", aliases_transformer)->required();
+	return cmd;
+}
+
+void process_cshadow(CLI::App* cshadow)
+{
+	const std::uint64_t va = get_command_option<std::uint64_t>(cshadow, "virtual_address");
+	const std::uint64_t result = hypercall::shadow_guest_page(va);
+
+	if (result != 0)
+		std::println("[+] page shadowed at 0x{:X} (shadow GPA: 0x{:X})", va, result);
+	else
+		std::println("[-] failed to shadow page at 0x{:X}", va);
+}
+
+// cunshadow <va> — restore original page in clone CR3 (undo shadow)
+CLI::App* init_cunshadow(CLI::App& app, CLI::Transformer& aliases_transformer)
+{
+	auto* cmd = app.add_subcommand("cunshadow", "unshadow (restore original) a guest page in clone CR3")->ignore_case();
+	add_transformed_command_option(cmd, "virtual_address", aliases_transformer)->required();
+	return cmd;
+}
+
+void process_cunshadow(CLI::App* cunshadow)
+{
+	const std::uint64_t va = get_command_option<std::uint64_t>(cunshadow, "virtual_address");
+	const std::uint64_t result = hypercall::unshadow_guest_page(va);
+
+	if (result != 0)
+		std::println("[+] page unshadowed at 0x{:X}", va);
+	else
+		std::println("[-] failed to unshadow page at 0x{:X}", va);
+}
+
+CLI::App* init_hook3(CLI::App& app)
+{
+	auto* cmd = app.add_subcommand("hook3", "Hook 3 (VMWRITE EPTP redirect): on/off/status/diag")->ignore_case();
+	cmd->add_option("state", "on, off, status, or diag")->required();
+	return cmd;
+}
+
+void process_hook3(CLI::App* hook3)
+{
+	if (!hook3->parsed()) return;
+
+	const std::string state = hook3->get_option("state")->as<std::string>();
+
+	if (state == "status" || state == "stat" || state == "s")
+	{
+		const auto on_hook   = hypercall::hook3_read_on_hook_count();
+		const auto on_hyperv = hypercall::hook3_read_on_hyperv_count();
+		const auto reboot    = hypercall::hook3_read_rebootstrap_count();
+		const auto slot1     = hypercall::hook3_read_slot1();
+		const auto slot2     = hypercall::hook3_read_slot2();
+		const auto total     = on_hook + on_hyperv;
+		const double pct     = total > 0 ? (100.0 * on_hook / total) : 0.0;
+
+		std::println("[Hook 3 EPTP diagnostics]");
+		std::println("  on_hook_cr3:   {:>12}  (Hook 3 working)", on_hook);
+		std::println("  on_hyperv_cr3: {:>12}  (bounce — Hook 3 inactive/failed)", on_hyperv);
+		std::println("  rebootstrap:   {:>12}  (Hook 2 forced EPTP back to hook_cr3)", reboot);
+		std::println("  SLOT1 (hyperv PFN): 0x{:X}", slot1);
+		std::println("  SLOT2 (hook_cr3 PA): 0x{:X}", slot2);
+		std::println("  hook_cr3 hit rate: {:.2f}%", pct);
+
+		// Option B diagnostics
+		const auto bail     = hypercall::hook3_optb_bail();
+		const auto per_vp   = hypercall::hook3_optb_per_vp();
+		const auto ept_data = hypercall::hook3_optb_ept_data();
+		const auto count    = hypercall::hook3_optb_count();
+		const char* bail_str[] = { "not called", "gs_offset=0", "per_vp=0", "ept_data=0", "bad count", "SUCCESS" };
+		std::println("  [Option B] bail={} ({}), per_vp=0x{:X}, ept_data=0x{:X}, count={}",
+			bail, bail < 6 ? bail_str[bail] : "?", per_vp, ept_data, count);
+
+		// Deep GS diagnostics — SWAPGS theory
+		const auto gs_base         = hypercall::hook3_optb_gs_base();
+		const auto kernel_gs_base  = hypercall::hook3_optb_manual_read();     // repurposed: KERNEL_GS_BASE
+		const auto kgs_per_vp      = hypercall::hook3_optb_gs_first_qword();  // repurposed: *(KERNEL_GS_BASE+offset)
+		const auto host_gs_base    = hypercall::hook3_optb_host_gs_base();
+		std::println("  [GS diag] IA32_GS_BASE (current)     = 0x{:X}", gs_base);
+		std::println("  [GS diag] IA32_KERNEL_GS_BASE (swap) = 0x{:X}", kernel_gs_base);
+		std::println("  [GS diag] VMCS HOST_GS_BASE          = 0x{:X}", host_gs_base);
+		std::println("  [GS diag] *(KERNEL_GS+0x2C180)       = 0x{:X}  {}", kgs_per_vp,
+			kgs_per_vp != 0 ? "<-- per_vp FOUND! SWAPGS confirmed" : "(still 0)");
+	}
+	else if (state == "diag" || state == "d")
+	{
+		std::println("[Hook 3 cave diagnostic — check serial for byte dump]");
+		const auto result = hypercall::hook3_cave_diag();
+		std::println("  cave_pa: 0x{:X}", hypercall::hook3_read_cave_pa());
+		std::println("  shellcode header: {}", (result & 1) ? "OK (50 52)" : "MISMATCH");
+		std::println("  SLOT1 in cave: {}", (result & 2) ? "SET (active)" : "ZERO (inactive!)");
+		std::println("  SLOT2 in cave: {}", (result & 4) ? "SET" : "ZERO (no target!)");
+		std::println("  Full shellcode dump on serial port.");
+	}
+	else
+	{
+		const bool enable = (state == "on" || state == "1" || state == "true");
+
+		if (hypercall::activate_vmwrite_hook(enable))
+			std::println("[+] Hook 3 {} — VP {} on hook_cr3", enable ? "activated" : "deactivated",
+				enable ? "locked" : "unlocked");
+		else
+			std::println("[-] Hook 3 command failed");
+	}
 }
 
 CLI::App* init_testmm(CLI::App& app)
@@ -1176,21 +1582,29 @@ void process_testmm(CLI::App* testmm)
 	}
 	std::println("[+] Hidden region at 0x{:X}", hidden_base);
 
-	// 5b. Initialize hook infrastructure (kernel detour holder + EPT split)
-	// Required for MMAF shellcode allocation — inject_dll calls this but testmm didn't
-	if (hook::set_up() == 0)
+	// 5b. Register UserDirectoryTableBase for KPTI CR3 interception
+	// KiPageFault inline hook needs both kernel DTB and user DTB PFNs
+	if (sys::offsets::kprocess_user_directory_table_base != 0)
 	{
-		std::println("[-] hook::set_up() failed — cannot install MMAF safety net");
-		hypercall::disable_cr3_intercept();
-		return;
+		std::uint64_t user_dtb = 0;
+		hypercall::read_guest_virtual_memory(&user_dtb,
+			process->eprocess + sys::offsets::kprocess_user_directory_table_base,
+			sys::current_cr3, 8);
+		if (user_dtb != 0)
+		{
+			if (hypercall::set_user_cr3(user_dtb))
+				std::println("[+] Registered UserDTB 0x{:X} for KPTI interception", user_dtb);
+			else
+				std::println("[!] WARNING: Failed to register UserDTB");
+		}
 	}
-	std::println("[+] Hook infrastructure initialized");
 
-	// 6. MmAccessFault C++ EPT hook — safety net for hidden memory #PFs
-	if (inject::install_mmaf_cpp_hook(cloned_cr3, 70))
-		std::println("[+] MmAccessFault safety net active");
+	// 6. KiPageFault inline EPT hook — zero-VMEXIT safety net for hidden memory #PFs.
+	// Replaces MmAccessFault hook (which was a catch-22: hook lived in hidden memory itself).
+	if (inject::install_page_fault_hook(70))
+		std::println("[+] Hidden memory #PF safety net active (KiPageFault inline hook)");
 	else
-		std::println("[!] WARNING: MmAccessFault hook failed — hidden memory faults will BSOD");
+		std::println("[!] WARNING: KiPageFault hook failed — hidden memory faults will BSOD");
 
 	// 7. Install MmClean EPT hook (RVA from PDB)
 	if (!inject::install_mmclean_hook(process->eprocess))
@@ -1212,6 +1626,12 @@ void process_testmm(CLI::App* testmm)
 		std::println("[!] WARNING: arm_process_cleanup returned 0 — PsGetProcessImageFileName resolution FAILED");
 	else
 		std::println("[+] MmClean armed for '{}' (PsGetProcessImageFileName resolved)", process->name);
+
+	// 9. Activate Hook 3 (VMWRITE EPTP redirect) — now safe because hidden region is mapped
+	if (hypercall::activate_vmwrite_hook(true))
+		std::println("[+] Hook 3 (VMWRITE redirect) activated — VP locked on hook_cr3");
+	else
+		std::println("[!] Hook 3 activation failed (cave PA not set?)");
 
 	std::println("[+] testmm active — kill {} and run 'boothook' to check counters", process->name);
 }
@@ -1287,7 +1707,15 @@ void commands::process(const std::string command)
 	CLI::App* uninject = init_uninject(app);
 	CLI::App* hookstatus = init_hookstatus(app);
 	CLI::App* boothook = init_boothook(app);
+	CLI::App* hookdiag = init_hookdiag(app);
 	CLI::App* testmm = init_testmm(app);
+	CLI::App* hook3 = init_hook3(app);
+	CLI::App* xtern = init_xtern(app);
+	CLI::App* detach = init_detach(app);
+	CLI::App* cwrite = init_cwrite(app, aliases_transformer);
+	CLI::App* cread = init_cread(app, aliases_transformer);
+	CLI::App* cshadow = init_cshadow(app, aliases_transformer);
+	CLI::App* cunshadow = init_cunshadow(app, aliases_transformer);
 
 	try
 	{
@@ -1333,7 +1761,15 @@ void commands::process(const std::string command)
 		d_process_command(uninject);
 		d_process_command(hookstatus);
 		d_process_command(boothook);
+		d_process_command(hookdiag);
 		d_process_command(testmm);
+		d_process_command(hook3);
+		d_process_command(xtern);
+		d_process_command(detach);
+		d_process_command(cwrite);
+		d_process_command(cread);
+		d_process_command(cshadow);
+		d_process_command(cunshadow);
 	}
 	catch (const CLI::ParseError& error)
 	{

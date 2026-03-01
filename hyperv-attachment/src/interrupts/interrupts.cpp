@@ -3,6 +3,7 @@
 #include "../slat/cr3/cr3.h"
 #include "../arch/arch.h"
 #include "../cr3_intercept.h"
+#include "../logs/serial.h"
 
 #include "ia32-doc/ia32.hpp"
 #include <intrin.h>
@@ -99,6 +100,31 @@ void interrupts::process_nmi()
 
     if (is_nmi_ready(current_apic_id) == 1)
     {
+        // [REMOVED] Option B: patch_eptp_source_table via NMI.
+        // Root cause of freeze: dereferences KERNEL_GS_BASE with unverified offsets
+        // (per_vp+0xCD8 wrong struct, count@0xBD0 not a count field per IDA).
+        // No longer needed: HvSetEptPointer entry hook (shellcode in hvix64 code cave)
+        // swaps PFN in [RCX] before the function runs → both lazy and direct paths
+        // write hook_cr3 natively. HV's own cache bookkeeping works for us.
+
+        // If Hook 3 active, force this LP onto hook_cr3.
+        // CRITICAL: Only write to VTL 0 VMCS. NMI can arrive while VP is processing
+        // a VTL 1 VMEXIT — writing VTL 0's hook_cr3 into VTL 1's VMCS causes
+        // HYPERVISOR_ERROR on next VTL 1 VMRESUME (wrong EPTP for Secure Kernel).
+        if (slat::is_vmwrite_hook_active() && slat::is_hook_cr3_ready())
+        {
+            const cr3 current_eptp = arch::get_slat_cr3();
+            if (slat::is_our_eptp(current_eptp))
+            {
+                static volatile std::uint8_t logged_nmi_force = 0;
+                if (!logged_nmi_force) { logged_nmi_force = 1; serial::println("[nmi] forcing LP onto hook_cr3 (Hook 3)"); }
+                // Preserve current VMCS metadata bits [11:0], only replace PML4 PFN
+                cr3 target = current_eptp;
+                target.address_of_page_directory = slat::hook_cr3().address_of_page_directory;
+                slat::set_cr3(target);
+            }
+        }
+
         slat::flush_current_logical_processor_cache();
 
         // NOTE: enable_cr3_exiting() REMOVED permanently.

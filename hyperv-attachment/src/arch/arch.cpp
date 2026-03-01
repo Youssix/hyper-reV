@@ -1,10 +1,37 @@
 #include "arch.h"
 #include "../crt/crt.h"
+#include "../memory_manager/memory_manager.h"
 
 #include <intrin.h>
 
 #ifdef _INTELMACHINE
 #include <ia32-doc/ia32.hpp>
+
+// Enlightened VMCS offsets extracted from HvSetEptPointer sig at boot.
+// Packed by hvloader: [31:0]=gs_per_vp, [47:32]=eptp_cache, [63:48]=clean_fields
+static std::uint32_t enlightened_gs_per_vp_offset = 0;
+static std::uint16_t enlightened_eptp_cache_offset = 0;
+static std::uint16_t enlightened_clean_fields_offset = 0;
+
+
+void arch::set_enlightened_vmcs_offsets(const std::uint64_t packed_offsets)
+{
+	enlightened_gs_per_vp_offset    = static_cast<std::uint32_t>(packed_offsets & 0xFFFFFFFF);
+	enlightened_eptp_cache_offset   = static_cast<std::uint16_t>((packed_offsets >> 32) & 0xFFFF);
+	enlightened_clean_fields_offset = static_cast<std::uint16_t>((packed_offsets >> 48) & 0xFFFF);
+}
+
+std::uint32_t arch::get_enlightened_gs_per_vp_offset() { return enlightened_gs_per_vp_offset; }
+std::uint16_t arch::get_enlightened_eptp_cache_offset() { return enlightened_eptp_cache_offset; }
+std::uint16_t arch::get_enlightened_clean_fields_offset() { return enlightened_clean_fields_offset; }
+
+
+std::uint64_t arch::vmread_host_gs_base()
+{
+	std::uint64_t value = 0;
+	__vmx_vmread(VMCS_HOST_GS_BASE, &value);
+	return value;
+}
 
 std::uint64_t vmread(const std::uint64_t field)
 {
@@ -260,6 +287,10 @@ void arch::set_slat_cr3(const cr3 slat_cr3)
 {
 #ifdef _INTELMACHINE
 	vmwrite(VMCS_CTRL_EPT_POINTER, slat_cr3.flags);
+	// NOTE: Enlightened VMCS cache sync intentionally NOT here.
+	// Writing to cache without patching the source table = Option D = BSOD 0x26.
+	// HV rebuilds EPTP from source table, not cache. Fix is in patch_eptp_source_table()
+	// which patches the source table so HV natively constructs hook_cr3.
 #else
 	vmcb_t* const vmcb = arch::get_vmcb();
 

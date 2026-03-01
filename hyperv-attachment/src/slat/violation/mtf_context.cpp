@@ -5,6 +5,7 @@
 #include "../../arch/arch.h"
 #include "../../memory_manager/memory_manager.h"
 #include "../../crt/crt.h"
+#include "../../logs/serial.h"
 #include "../../structures/virtual_address.h"
 
 namespace
@@ -67,7 +68,15 @@ std::uint8_t slat::mtf::process()
 
 		const hook::entry_t* const hook_entry = hook::entry_t::find(faulting_pfn);
 
-		if (hook_entry != nullptr)
+		// Shadow code pages: NEVER sync writes from original to shadow.
+		// Our code lives on these pages. Windows will never hot-patch pure CC padding.
+		// Skip sync entirely — just swap back to hook_cr3 below.
+		if (hook_entry != nullptr && hook_entry->shadow_code_page())
+		{
+			static volatile std::uint8_t logged_sc_skip = 0;
+			if (!logged_sc_skip) { logged_sc_skip = 1; serial::print("[mtf] shadow_code_page write sync SKIPPED GPA="); serial::print_hex(ctx->pending_gpa); serial::println(""); }
+		}
+		else if (hook_entry != nullptr)
 		{
 			// Get shadow page from hook_cr3 PTE (shadow PFN is now in hook_cr3)
 			slat_pte* const hook_cr3_pte = get_pte(hook_cr3(), gpa);
@@ -162,10 +171,8 @@ std::uint8_t slat::mtf::process()
 	}
 
 	// 4. Swap EPTP back to hook_cr3 (guest resumes on our EPTP)
+	// set_cr3 already calls flush_current_logical_processor_cache internally
 	set_cr3(hook_cr3());
-
-	// 5. Flush EPT cache
-	flush_current_logical_processor_cache();
 
 	// 6. Clear context
 	ctx->active = 0;

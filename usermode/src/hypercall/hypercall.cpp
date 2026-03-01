@@ -209,6 +209,30 @@ std::uint64_t hypercall::unshadow_guest_page(std::uint64_t target_va)
 	return make_hypercall(hypercall_type_t::clone_guest_cr3, 6, target_va, 0, 0);
 }
 
+// WriteCloneVirtualMemory: stealth write into the clone CR3's address space.
+// Auto-shadows pages on first write so the original stays clean.
+// source_buffer = data in our process, dest_va = VA in target, size = byte count.
+// Returns: number of bytes written.
+std::uint64_t hypercall::WriteCloneVirtualMemory(void* source_buffer, std::uint64_t dest_va, std::uint64_t size)
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 38,
+		dest_va,
+		reinterpret_cast<std::uint64_t>(source_buffer),
+		size);
+}
+
+// ReadCloneVirtualMemory: read what the target actually sees via clone CR3.
+// If the page is shadowed, reads the shadow; otherwise reads the original.
+// dest_buffer = buffer in our process, source_va = VA in target, size = byte count.
+// Returns: number of bytes read.
+std::uint64_t hypercall::ReadCloneVirtualMemory(void* dest_buffer, std::uint64_t source_va, std::uint64_t size)
+{
+	return make_hypercall(hypercall_type_t::clone_guest_cr3, 39,
+		source_va,
+		reinterpret_cast<std::uint64_t>(dest_buffer),
+		size);
+}
+
 std::uint64_t hypercall::add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address)
 {
 	hypercall_type_t call_type = hypercall_type_t::add_slat_code_hook;
@@ -275,9 +299,99 @@ std::uint64_t hypercall::read_cleanup_count()
 	return make_hypercall(hypercall_type_t::read_guest_cr3, 28, 0, 0, 0);
 }
 
+std::uint64_t hypercall::activate_vmwrite_hook(bool enable)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, enable ? 1 : 0, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_read_on_hook_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 2, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_read_on_hyperv_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 3, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_read_rebootstrap_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 4, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_read_shellcode_exec_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 5, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_read_slot1()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 6, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_read_slot2()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 7, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_cave_diag()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 8, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_read_cave_pa()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 9, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_bail()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 10, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_per_vp()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 11, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_ept_data()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 12, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 13, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_gs_base()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 14, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_manual_read()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 15, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_gs_first_qword()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 16, 0, 0);
+}
+
+std::uint64_t hypercall::hook3_optb_host_gs_base()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 32, 17, 0, 0);
+}
+
 std::uint64_t hypercall::read_boot_hook_diag(std::uint64_t field)
 {
 	return make_hypercall(hypercall_type_t::read_guest_cr3, 35, field, 0, 0);
+}
+
+std::uint64_t hypercall::hookdiag(std::uint64_t field)
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 50, field, 0, 0);
 }
 
 std::uint64_t hypercall::setup_exception_handler(std::uint64_t ki_dispatch_exception_va,
@@ -358,6 +472,11 @@ std::uint64_t hypercall::sig_scan_kernel(std::uint64_t scan_base, std::uint64_t 
 std::uint64_t hypercall::read_mmaf_hit_count()
 {
 	return make_hypercall(hypercall_type_t::read_guest_cr3, 6, 0, 0, 0);
+}
+
+std::uint64_t hypercall::read_mmaf_total_count()
+{
+	return make_hypercall(hypercall_type_t::read_guest_cr3, 37, 0, 0, 0);
 }
 
 std::uint64_t hypercall::screenshot_enable()

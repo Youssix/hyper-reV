@@ -1,5 +1,6 @@
 #include "renderer.h"
 #include "theme.h"
+#include "../vendor/fa_solid_900.h"
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -27,6 +28,8 @@ namespace renderer
 	static ImFont* g_font_bold    = nullptr;
 	static ImFont* g_font_title   = nullptr;
 
+	static float g_caption_exclude_width = 80.0f;
+
 	static void create_render_target()
 	{
 		ID3D11Texture2D* back_buffer = nullptr;
@@ -52,14 +55,17 @@ namespace renderer
 		{
 		case WM_NCHITTEST:
 		{
-			// title bar drag: top 42px, only left portion (logo + label area)
-			// right side has user info, logout button, min/close — must stay clickable
+			// title bar drag: top 44px, entire width except right-side buttons/info
 			POINT pt;
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
 			ScreenToClient(hWnd, &pt);
-			if (pt.y < 42 && pt.x < 280)
-				return HTCAPTION;
+			if (pt.y < 44)
+			{
+				RECT rc; GetClientRect(hWnd, &rc);
+				if (pt.x < rc.right - (int)g_caption_exclude_width)
+					return HTCAPTION;
+			}
 			return HTCLIENT;
 		}
 		case WM_SIZE:
@@ -130,10 +136,26 @@ namespace renderer
 		io.IniFilename = nullptr;
 		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-		// load fonts
+		// load fonts + merge embedded FontAwesome icons
+		static const ImWchar fa_ranges[] = { 0xe005, 0xf8ff, 0 };
+		auto merge_fa = [&](float size)
+		{
+			ImFontConfig cfg;
+			cfg.MergeMode = true;
+			cfg.PixelSnapH = true;
+			cfg.GlyphMinAdvanceX = size;
+			cfg.FontDataOwnedByAtlas = false; // we own the static data
+			io.Fonts->AddFontFromMemoryTTF((void*)fa_solid_900_ttf_data, fa_solid_900_ttf_size, size - 1.0f, &cfg, fa_ranges);
+		};
+
 		g_font_regular = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f);
-		g_font_bold    = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 16.0f);
-		g_font_title   = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 22.0f);
+		if (g_font_regular) merge_fa(16.0f);
+
+		g_font_bold = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 16.0f);
+		if (g_font_bold) merge_fa(16.0f);
+
+		g_font_title = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisb.ttf", 22.0f);
+		if (g_font_title) merge_fa(20.0f);
 
 		if (!g_font_regular) g_font_regular = io.Fonts->AddFontDefault();
 		if (!g_font_bold)    g_font_bold    = g_font_regular;
@@ -213,6 +235,8 @@ namespace renderer
 		// subtle outer-ish glow (inner 2px border)
 		fg->AddRect(ImVec2(1, 1), ImVec2(p_max.x - 1, p_max.y - 1), glow, 0.0f, 0, 1.0f);
 	}
+
+	void set_caption_exclude_width(float w) { g_caption_exclude_width = w; }
 
 	ImFont* font_regular() { return g_font_regular; }
 	ImFont* font_bold()    { return g_font_bold; }

@@ -11,6 +11,11 @@
 hook_data_t hvloader_launch_hv_hook_data = { 0 };
 hook_data_t hv_vmexit_hook_data = { 0 };
 
+UINT64 vmwrite_hook_cave_pa = 0;
+// Packed enlightened VMCS offsets from HvSetEptPointer sig scan:
+// [31:0] = gs:???? per-VP struct offset, [47:32] = EPTP cache offset, [63:48] = clean_fields offset
+UINT64 enlightened_vmcs_offsets = 0;
+
 typedef void(*hvloader_launch_hv_t)(cr3 a1, virtual_address_t a2, UINT64 a3, UINT64 a4);
 
 void set_up_identity_map(pml4e_64* pml4e)
@@ -127,6 +132,42 @@ UINT64 find_hyperv_text_end(cr3 hyperv_cr3, virtual_address_t entry_point)
     return text_address.address - 0x1000;
 }
 
+UINT64 get_physical_address_from_va(cr3 cr3_to_search, UINT64 va)
+{
+    virtual_address_t vaddr = { .address = va };
+    pml4e_64* pml4 = (pml4e_64*)(cr3_to_search.address_of_page_directory << 12);
+    pml4e_64 pml4e = pml4[vaddr.pml4_idx];
+
+    if (pml4e.present == 0)
+        return 0;
+
+    pdpte_64* pdpt = (pdpte_64*)(pml4e.page_frame_number << 12);
+    pdpte_64 pdpte = pdpt[vaddr.pdpt_idx];
+
+    if (pdpte.present == 0)
+        return 0;
+
+    if (pdpte.large_page == 1)
+        return (pdpte.page_frame_number << 30) | (va & 0x3FFFFFFFull);
+
+    pde_64* pd = (pde_64*)(pdpte.page_frame_number << 12);
+    pde_64 pde = pd[vaddr.pd_idx];
+
+    if (pde.present == 0)
+        return 0;
+
+    if (pde.large_page == 1)
+        return (pde.page_frame_number << 21) | (va & 0x1FFFFFull);
+
+    pte_64* pt = (pte_64*)(pde.page_frame_number << 12);
+    pte_64 pte = pt[vaddr.pt_idx];
+
+    if (pte.present == 0)
+        return 0;
+
+    return (pte.page_frame_number << 12) | (va & 0xFFFull);
+}
+
 void build_entry_trampoline(CHAR8* code_cave, CHAR8* entry_point_address)
 {
     // Copy 18 displaced bytes (3 complete instructions) from the entry point
@@ -221,7 +262,6 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
                 UINT64 heap_total_size = hyperv_attachment_heap_allocation_size;
 
                 // Intel: scan for VMEXIT entry point and find second code cave for trampoline
-                // DEBUG: Hook 1 disabled — testing if Hook 2 alone boots correctly
                 UINT64 vmexit_entry_trampoline = 0;
                 CHAR8* vmexit_entry_point = NULL;
 
@@ -247,9 +287,118 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
                             vmexit_entry_trampoline = (UINT64)code_cave_2;
                         }
                     }
+
+                    // Hook 3: VMWRITE EPT_POINTER redirect
+                    // Intercepts the ONLY function in hvix64 that writes EPTP to VMCS/cache.
+                    // When active (patch slots filled), replaces hyperv_cr3 PFN → hook_cr3 PFN
+                    // so VP stays on hook_cr3 permanently — no more EPTP bounce.
+                    // Installed BEFORE entry_point so cave PA is available to pass to attachment.
+                    {
+                        CHAR8* vmwrite_eptp_func = NULL;
+
+                        status = scan_image(&vmwrite_eptp_func, (CHAR8*)hyperv_text_base, hyperv_text_size,
+                            "\xF6\x05\x00\x00\x00\x00\x00\x74\x00\x65\x48\x8B\x14\x25\x00\x00\x00\x00"
+                            "\x48\x8B\x01\x0F\xBA\xB2\x00\x00\x00\x00\x00\x48\x89\x82\x00\x00\x00\x00"
+                            "\xC3\xCC\xBA\x00\x00\x00\x00\x0F\x79\x11\xC3\xCC\xCC\xCC\xCC\xCC\xCC\xCC"
+                            "\xCC\xCC\x48\x89\x5C\x24",
+                            "xx?????x?xxxxx????xxxxxx?????xxx????xxx????xxxxxxxxxxxxxxxxx");
+
+                        if (status == EFI_SUCCESS)
+                        {
+                            // Extract enlightened VMCS offsets from HvSetEptPointer sig match:
+                            // +14: gs:???? (per-VP ptr), +24: btr [rdx+????] (clean_fields), +32: mov [rdx+????] (EPTP cache)
+                            UINT32 gs_per_vp_off    = *(UINT32*)(vmwrite_eptp_func + 14);
+                            UINT32 eptp_cache_off   = *(UINT32*)(vmwrite_eptp_func + 32);
+                            UINT32 clean_fields_off = *(UINT32*)(vmwrite_eptp_func + 24);
+                            enlightened_vmcs_offsets = (UINT64)gs_per_vp_off
+                                | ((UINT64)(eptp_cache_off & 0xFFFF) << 32)
+                                | ((UINT64)(clean_fields_off & 0xFFFF) << 48);
+
+                            // Find a code cave (80+ CC bytes) for Hook 3 shellcode (73 bytes)
+                            CHAR8* hook3_cave = NULL;
+
+                            status = scan_image(&hook3_cave, (CHAR8*)hyperv_text_base, hyperv_text_size,
+                                "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC"
+                                "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC"
+                                "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC"
+                                "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC"
+                                "\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC\xCC",
+                                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                                "xxxxxxxxxxxxxxxx");
+
+                            if (status == EFI_SUCCESS)
+                            {
+                                UINT64 cave_va = (UINT64)hook3_cave;
+
+                                // Parse displaced instruction's RIP-relative target
+                                // Original: test byte ptr [rip+rel32], 1 at vmwrite_eptp_func
+                                INT32 original_rel32 = *(INT32*)(vmwrite_eptp_func + 2);
+                                UINT64 flag_target_va = (UINT64)(vmwrite_eptp_func + 7) + original_rel32;
+
+                                // Parse original jz to find both branch targets
+                                UINT8 jz_rel8 = *(UINT8*)(vmwrite_eptp_func + 8);
+                                UINT64 direct_vmwrite_va = (UINT64)(vmwrite_eptp_func + 9) + jz_rel8;
+                                UINT64 lazy_cache_va = (UINT64)(vmwrite_eptp_func + 9);
+
+                                // 73-byte shellcode: PFN check + EPTP replace + displaced test/jz/jmp
+                                // PATCH_SLOT_1 at cave+4:  hyperv_cr3 PFN (8 bytes, initially 0 = inactive)
+                                // PATCH_SLOT_2 at cave+39: hook_cr3 PFN << 12 (8 bytes, initially 0)
+                                // NOTE: no lock inc counter — .text is read-only at runtime, writes fault.
+                                UINT8 shellcode[73] = {
+                                    0x50,                                           // [0]     push rax
+                                    0x52,                                           // [1]     push rdx
+                                    0x48, 0xBA, 0,0,0,0, 0,0,0,0,                  // [2-11]  movabs rdx, SLOT1
+                                    0x48, 0x85, 0xD2,                               // [12-14] test rdx, rdx
+                                    0x74, 0x24,                                     // [15-16] jz .skip (→ 53)
+                                    0x48, 0x8B, 0x01,                               // [17-19] mov rax, [rcx]
+                                    0x48, 0xC1, 0xE8, 0x0C,                         // [20-23] shr rax, 12
+                                    0x48, 0x39, 0xD0,                               // [24-26] cmp rax, rdx
+                                    0x75, 0x18,                                     // [27-28] jne .skip (→ 53)
+                                    0x48, 0x8B, 0x01,                               // [29-31] mov rax, [rcx]
+                                    0x25, 0xFF, 0x0F, 0x00, 0x00,                   // [32-36] and eax, 0FFFh
+                                    0x48, 0xBA, 0,0,0,0, 0,0,0,0,                  // [37-46] movabs rdx, SLOT2
+                                    0x48, 0x09, 0xD0,                               // [47-49] or rax, rdx
+                                    0x48, 0x89, 0x01,                               // [50-52] mov [rcx], rax
+                                    0x5A,                                           // [53]    .skip: pop rdx
+                                    0x58,                                           // [54]    pop rax
+                                    0xF6, 0x05, 0,0,0,0, 0x01,                     // [55-61] test byte [rip+XX], 1
+                                    0x0F, 0x84, 0,0,0,0,                           // [62-67] jz direct_path
+                                    0xE9, 0,0,0,0,                                 // [68-72] jmp lazy_path
+                                };
+
+                                // Verify jz/jne skip targets:
+                                // jz at [15]: IP after = 17, target = 53, rel8 = 53-17 = 36 = 0x24 ✓
+                                // jne at [27]: IP after = 29, target = 53, rel8 = 53-29 = 24 = 0x18 ✓
+
+                                // Fixup: displaced test byte ptr [rip+XX], 1
+                                // Instruction at offset 55, 7 bytes long, RIP after = 62
+                                *(INT32*)(&shellcode[57]) = (INT32)(flag_target_va - (cave_va + 62));
+
+                                // Fixup: jz → direct VMWRITE path
+                                // Instruction at offset 62, 6 bytes long, RIP after = 68
+                                *(INT32*)(&shellcode[64]) = (INT32)(direct_vmwrite_va - (cave_va + 68));
+
+                                // Fixup: jmp → lazy cache path
+                                // Instruction at offset 68, 5 bytes long, RIP after = 73
+                                *(INT32*)(&shellcode[69]) = (INT32)(lazy_cache_va - (cave_va + 73));
+
+                                // Write shellcode to code cave
+                                mm_copy_memory((UINT8*)hook3_cave, shellcode, sizeof(shellcode));
+
+                                // Patch function entry: JMP rel32 + 2 NOP (replaces 7-byte test instruction)
+                                UINT8 jmp_patch[7] = { 0xE9, 0,0,0,0, 0x90, 0x90 };
+                                *(INT32*)(&jmp_patch[1]) = (INT32)(cave_va - ((UINT64)vmwrite_eptp_func + 5));
+                                mm_copy_memory((UINT8*)vmwrite_eptp_func, jmp_patch, sizeof(jmp_patch));
+
+                                // Physical address of code cave → attachment patches SLOT1/SLOT2 at runtime
+                                vmwrite_hook_cave_pa = get_physical_address_from_va(hyperv_cr3, cave_va);
+                            }
+                        }
+                    }
                 }
 
-                hyperv_attachment_invoke_entry_point(hyperv_attachment_detours, hyperv_attachment_entry_point, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget, vmexit_entry_trampoline);
+                hyperv_attachment_invoke_entry_point(hyperv_attachment_detours, hyperv_attachment_entry_point, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget, vmexit_entry_trampoline, vmwrite_hook_cave_pa, enlightened_vmcs_offsets);
 
                 // Hook 2: processing hook on the CALL to vmexit handler (existing mechanism)
                 CHAR8* code_cave = NULL;

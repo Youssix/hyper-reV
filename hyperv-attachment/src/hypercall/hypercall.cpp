@@ -7,10 +7,13 @@
 #include "../slat/violation/mtf_context.h"
 #include "../slat/cr3/pte.h"
 #include "../slat/hook/hook.h"
+#include "../slat/hook/hook_entry.h"
 #include "../slat/monitor/monitor.h"
+#include "../slat/shadow_code/shadow_code.h"
 
 #include "../arch/arch.h"
 #include "../logs/logs.h"
+#include "../logs/serial.h"
 #include "../crt/crt.h"
 #include "../cr3_intercept.h"
 #include "../interrupts/interrupts.h"
@@ -19,29 +22,35 @@
 #include <hypercall/hypercall_def.h>
 #include <intrin.h>
 
+// Hook 3 diagnostic counters (defined in main.cpp)
+extern volatile long long hook3_on_hook_cr3_count;
+extern volatile long long hook3_on_hyperv_cr3_count;
+extern volatile long long hook3_rebootstrap_count;
+
 //=============================================================================
 // Shadow guest page helpers
 //=============================================================================
 
-// Set RWX on a physical page in both EPT roots (hyperv + hook)
-// Unhide a heap page in hook_cr3 ONLY. hyperv_cr3 is NEVER modified — our heap pages
-// are already accessible there via Hyper-V's 2MB identity-mapped EPT large pages.
-// Modifying hyperv_cr3 triggers HyperGuard PAGE_HASH_MISMATCH (splits 2MB → 4KB,
-// changes EPT page structure that HyperGuard hashes).
+// Unhide a heap page in hook_cr3 ONLY (set to RWX).
+// CRITICAL: Must use fork_get_pte, NOT get_pte. hook_cr3 is a shallow copy
+// of hyperv_cr3 — intermediate pages (PDPT, PD) are SHARED. Using get_pte
+// with force_split writes to shared pages → corrupts hyperv_cr3 → HyperGuard
+// PAGE_HASH_MISMATCH → instant reboot (triple fault in host mode).
+// fork_get_pte forks intermediate pages before modifying, keeping hyperv_cr3 pristine.
 void unhide_physical_page(const cr3& /*slat_cr3*/, std::uint64_t pa)
 {
-    auto set_rwx = [](slat_pte* pte, std::uint64_t pa) {
-        if (!pte) return;
-        pte->page_frame_number = pa >> 12;
-        pte->read_access = 1;
-        pte->write_access = 1;
-        pte->execute_access = 1;
-    };
-    // Only unhide in hook_cr3 (our private shallow copy with fork-on-write).
-    // hyperv_cr3 stays pristine — HyperGuard never sees modified EPT pages.
     const cr3 hook = slat::hook_cr3();
-    if (hook.flags != 0)
-        set_rwx(slat::get_pte(hook, { .address = pa }, 1), pa);
+    if (hook.flags == 0)
+        return;
+
+    std::uint8_t split_state = 0;
+    slat_pte* pte = slat::fork_get_pte(hook, slat::hyperv_cr3(), { .address = pa }, 1, &split_state);
+    if (!pte) return;
+
+    pte->page_frame_number = pa >> 12;
+    pte->read_access = 1;
+    pte->write_access = 1;
+    pte->execute_access = 1;
 }
 
 // Clone a guest page table page (PDPT, PD, or PT) privately for clone CR3.
@@ -260,6 +269,157 @@ std::uint64_t unshadow_guest_page_impl(const cr3& slat_cr3, std::uint64_t target
 }
 
 //=============================================================================
+// External stealth R/W via clone CR3
+//
+// These functions let usermode read/write the target process memory through
+// the clone CR3 instead of the original. The anticheat reads via the original
+// CR3 and sees clean bytes; the target executes via the clone and sees our
+// modifications. Pages that aren't yet forked (shadow == original) get
+// auto-shadowed on first write so the original stays untouched.
+//=============================================================================
+
+// WriteCloneVirtualMemory: write into the clone CR3's address space.
+// Auto-shadows pages that haven't been forked yet (clone PTE == original PTE).
+//
+// Parameters (from trap frame):
+//   RDX = dest_va      — destination VA in the target process (clone CR3)
+//   R8  = source_va    — source VA in the caller's address space
+//   R9  = size         — number of bytes to write
+//
+// Returns: number of bytes successfully written
+std::uint64_t WriteCloneVirtualMemory_impl(const trap_frame_t* trap_frame)
+{
+    // 1. Validate: clone must exist
+    if (cr3_intercept::cloned_pml4_host_va == nullptr)
+        return 0;
+
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+    const cr3 clone_cr3   = { .address_of_page_directory = cr3_intercept::cloned_cr3_value >> 12 };
+    const cr3 original_cr3 = { .flags = cr3_intercept::target_original_cr3 };
+    const cr3 caller_cr3  = arch::get_guest_cr3(); // usermode caller's CR3
+
+    const std::uint64_t dest_va   = trap_frame->rdx;
+    const std::uint64_t source_va = trap_frame->r8;
+    std::uint64_t size_remaining  = trap_frame->r9;
+    std::uint64_t bytes_written   = 0;
+
+    // 2. Process page by page (handles cross-page writes)
+    while (size_remaining > 0)
+    {
+        const std::uint64_t current_dest = dest_va + bytes_written;
+        const std::uint64_t current_src  = source_va + bytes_written;
+
+        // 2a. Translate dest_va through clone CR3 → get current clone GPA
+        std::uint64_t dest_virt_left = 0;
+        const std::uint64_t clone_gpa = memory_manager::translate_guest_virtual_address(
+            clone_cr3, slat_cr3, { .address = current_dest }, &dest_virt_left);
+        if (clone_gpa == 0) break;
+
+        // 2b. Translate dest_va through original CR3 → get original GPA
+        const std::uint64_t orig_gpa = memory_manager::translate_guest_virtual_address(
+            original_cr3, slat_cr3, { .address = current_dest });
+        if (orig_gpa == 0) break;
+
+        // 2c. If page-aligned GPAs match, the page isn't shadowed yet → auto-shadow
+        if ((clone_gpa & ~0xFFFull) == (orig_gpa & ~0xFFFull))
+        {
+            const std::uint64_t shadow_result = shadow_guest_page_impl(slat_cr3, current_dest);
+            if (shadow_result == 0) break; // shadow allocation failed
+        }
+
+        // 2d. Re-translate through clone (now points to shadow page)
+        std::uint64_t shadow_virt_left = 0;
+        const std::uint64_t shadow_gpa = memory_manager::translate_guest_virtual_address(
+            clone_cr3, slat_cr3, { .address = current_dest }, &shadow_virt_left);
+        if (shadow_gpa == 0) break;
+
+        // 2e. Translate source VA in caller's address space
+        std::uint64_t src_virt_left = 0;
+        const std::uint64_t src_gpa = memory_manager::translate_guest_virtual_address(
+            caller_cr3, slat_cr3, { .address = current_src }, &src_virt_left);
+        if (src_gpa == 0) break;
+
+        // 2f. Map both physical pages and copy
+        void* dst_mapped = memory_manager::map_guest_physical(slat_cr3, shadow_gpa);
+        const void* src_mapped = memory_manager::map_guest_physical(slat_cr3, src_gpa);
+        if (!dst_mapped || !src_mapped) break;
+
+        // Calculate how many bytes we can copy within current page boundaries
+        const std::uint64_t page_budget = crt::min(shadow_virt_left, src_virt_left);
+        const std::uint64_t copy_size   = crt::min(size_remaining, page_budget);
+        if (copy_size == 0) break;
+
+        crt::copy_memory(dst_mapped, src_mapped, copy_size);
+
+        bytes_written  += copy_size;
+        size_remaining -= copy_size;
+    }
+
+    return bytes_written;
+}
+
+// ReadCloneVirtualMemory: read from the clone CR3's address space.
+// Returns what the target process actually sees (shadow pages if present,
+// original pages otherwise). Useful to verify stealth writes.
+//
+// Parameters (from trap frame):
+//   RDX = source_va    — source VA in the target process (clone CR3)
+//   R8  = dest_va      — destination VA in the caller's address space
+//   R9  = size         — number of bytes to read
+//
+// Returns: number of bytes successfully read
+std::uint64_t ReadCloneVirtualMemory_impl(const trap_frame_t* trap_frame)
+{
+    // 1. Validate: clone must exist
+    if (cr3_intercept::cloned_pml4_host_va == nullptr)
+        return 0;
+
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+    const cr3 clone_cr3  = { .address_of_page_directory = cr3_intercept::cloned_cr3_value >> 12 };
+    const cr3 caller_cr3 = arch::get_guest_cr3(); // usermode caller's CR3
+
+    const std::uint64_t source_va = trap_frame->rdx;
+    const std::uint64_t dest_va   = trap_frame->r8;
+    std::uint64_t size_remaining  = trap_frame->r9;
+    std::uint64_t bytes_read      = 0;
+
+    // 2. Process page by page
+    while (size_remaining > 0)
+    {
+        const std::uint64_t current_src  = source_va + bytes_read;
+        const std::uint64_t current_dest = dest_va + bytes_read;
+
+        // 2a. Translate source VA through clone CR3
+        std::uint64_t src_virt_left = 0;
+        const std::uint64_t src_gpa = memory_manager::translate_guest_virtual_address(
+            clone_cr3, slat_cr3, { .address = current_src }, &src_virt_left);
+        if (src_gpa == 0) break;
+
+        // 2b. Translate dest VA in caller's address space
+        std::uint64_t dst_virt_left = 0;
+        const std::uint64_t dst_gpa = memory_manager::translate_guest_virtual_address(
+            caller_cr3, slat_cr3, { .address = current_dest }, &dst_virt_left);
+        if (dst_gpa == 0) break;
+
+        // 2c. Map both and copy
+        const void* src_mapped = memory_manager::map_guest_physical(slat_cr3, src_gpa);
+        void* dst_mapped = memory_manager::map_guest_physical(slat_cr3, dst_gpa);
+        if (!src_mapped || !dst_mapped) break;
+
+        const std::uint64_t page_budget = crt::min(src_virt_left, dst_virt_left);
+        const std::uint64_t copy_size   = crt::min(size_remaining, page_budget);
+        if (copy_size == 0) break;
+
+        crt::copy_memory(dst_mapped, src_mapped, copy_size);
+
+        bytes_read     += copy_size;
+        size_remaining -= copy_size;
+    }
+
+    return bytes_read;
+}
+
+//=============================================================================
 // EPT inline hook helpers (relay commands 4/5/6)
 //=============================================================================
 
@@ -416,7 +576,8 @@ std::uint64_t alloc_hidden_page_impl()
 
     if (hook.flags != 0)
     {
-        slat_pte* const pte = slat::get_pte(hook, { .address = data_pa }, 1);
+        std::uint8_t split_state_579 = 0;
+        slat_pte* const pte = slat::fork_get_pte(hook, slat::hyperv_cr3(), { .address = data_pa }, 1, &split_state_579);
         if (pte != nullptr)
         {
             pte->page_frame_number = data_pa >> 12;
@@ -1057,7 +1218,8 @@ std::uint64_t map_attachment_to_hidden_region()
         // HyperGuard PAGE_HASH_MISMATCH (EPT structure hash changes).
         if (hook.flags != 0)
         {
-            slat_pte* pte = slat::get_pte(hook, { .address = page_pa }, 1);
+            std::uint8_t split_state_1220 = 0;
+            slat_pte* pte = slat::fork_get_pte(hook, slat::hyperv_cr3(), { .address = page_pa }, 1, &split_state_1220);
             if (pte)
             {
                 pte->page_frame_number = page_pa >> 12;
@@ -1101,6 +1263,8 @@ std::uint64_t sig_scan_guest_pages(std::uint64_t base_va, std::uint64_t scan_siz
     const std::uint8_t* pattern, const char* mask, std::uint32_t pattern_len);
 std::uint64_t setup_mmclean_inline_hook_impl(
     std::uint64_t target_va, std::uint64_t target_eprocess, std::uint32_t displaced_count);
+std::uint64_t setup_mmclean_precheck_hook_impl(
+    std::uint64_t target_va, std::uint64_t target_eprocess, std::uint32_t displaced_count);
 
 // Helper: returns a valid guest CR3 for kernel VA translation.
 // At boot (no target process yet), uses the current guest CR3 from VMCS.
@@ -1116,8 +1280,15 @@ static cr3 get_guest_cr3_for_translation()
 // Autonomous kernel resolution — zero usermode dependency
 //=============================================================================
 
-// Scan backwards from a VA inside a module to find the MZ header (PE base)
-static std::uint64_t find_module_base(std::uint64_t va_inside_module)
+// Forward declaration (defined below find_module_base)
+static std::uint64_t get_module_size(std::uint64_t module_base);
+
+// Scan backwards from a VA inside a module to find the MZ header (PE base).
+// va_must_be_within: if nonzero, verify that this VA falls within [base, base+SizeOfImage).
+// On KPTI systems, IDT handlers point to KVASCODE (mapped far from ntoskrnl .text).
+// Walking backward can hit MZ headers of other modules in between.
+// Passing the IDT handler VA here ensures we only return a base that actually owns it.
+static std::uint64_t find_module_base(std::uint64_t va_inside_module, std::uint64_t va_must_be_within = 0)
 {
     const cr3 slat_cr3 = slat::hyperv_cr3();
     const cr3 guest_cr3 = get_guest_cr3_for_translation();
@@ -1132,7 +1303,20 @@ static std::uint64_t find_module_base(std::uint64_t va_inside_module)
             const auto* ptr = static_cast<const std::uint8_t*>(
                 memory_manager::map_guest_physical(slat_cr3, pa));
             if (ptr && ptr[0] == 'M' && ptr[1] == 'Z')
+            {
+                // If caller requires the target VA to be within this module, verify SizeOfImage
+                if (va_must_be_within != 0)
+                {
+                    const std::uint64_t mod_size = get_module_size(page);
+                    if (mod_size == 0 || va_must_be_within < page || va_must_be_within >= page + mod_size)
+                    {
+                        // This MZ doesn't own the target VA — skip and keep scanning
+                        page -= 0x1000;
+                        continue;
+                    }
+                }
                 return page;
+            }
         }
         page -= 0x1000;
     }
@@ -1161,12 +1345,15 @@ static std::uint64_t read_idt_handler(std::uint8_t vector)
     return offset_low | (offset_mid << 16) | (offset_high << 32);
 }
 
-// Find ntoskrnl base via IDT — any IDT handler points into ntoskrnl
+// Find ntoskrnl base via IDT — IDT #DE handler is in ntoskrnl (possibly KVASCODE section).
+// On KPTI systems, IDT entries point to KVASCODE stubs mapped far from .text.
+// find_module_base with va_must_be_within skips MZ headers of modules between KVASCODE and ntoskrnl base.
 static std::uint64_t find_ntoskrnl_base()
 {
     const std::uint64_t handler_va = read_idt_handler(0); // #DE always in ntoskrnl
     if (handler_va == 0) return 0;
-    return find_module_base(handler_va);
+    // No log here — called on every deferred retry (serial stalls VMEXIT handler)
+    return find_module_base(handler_va, handler_va);
 }
 
 // Get ntoskrnl size from PE headers (for sig scan bounds)
@@ -1195,6 +1382,67 @@ static std::uint64_t get_module_size(std::uint64_t module_base)
     return *reinterpret_cast<const std::uint32_t*>(pe + 24 + 56);
 }
 
+// Find .text section VA and size from PE headers.
+// Returns true on success, fills text_va and text_size.
+static bool find_text_section(std::uint64_t module_base, std::uint64_t* text_va, std::uint64_t* text_size)
+{
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+    const cr3 guest_cr3 = get_guest_cr3_for_translation();
+
+    // Read DOS header → e_lfanew
+    const std::uint64_t dos_pa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, { .address = module_base });
+    if (dos_pa == 0) return false;
+    const auto* dos = static_cast<const std::uint8_t*>(
+        memory_manager::map_guest_physical(slat_cr3, dos_pa));
+    if (!dos || dos[0] != 'M' || dos[1] != 'Z') return false;
+
+    const std::uint32_t e_lfanew = *reinterpret_cast<const std::uint32_t*>(dos + 0x3C);
+    const std::uint64_t pe_va = module_base + e_lfanew;
+    const std::uint64_t pe_pa = memory_manager::translate_guest_virtual_address(
+        guest_cr3, slat_cr3, { .address = pe_va });
+    if (pe_pa == 0) return false;
+    const auto* pe = static_cast<const std::uint8_t*>(
+        memory_manager::map_guest_physical(slat_cr3, pe_pa));
+    if (!pe || pe[0] != 'P' || pe[1] != 'E') return false;
+
+    // COFF FileHeader: NumberOfSections at PE+6, SizeOfOptionalHeader at PE+20
+    const std::uint16_t num_sections = *reinterpret_cast<const std::uint16_t*>(pe + 6);
+    const std::uint16_t opt_header_size = *reinterpret_cast<const std::uint16_t*>(pe + 20);
+
+    // Section headers start at PE + 24 + SizeOfOptionalHeader, each 40 bytes
+    const std::uint64_t sections_rva = e_lfanew + 24 + opt_header_size;
+
+    for (std::uint16_t i = 0; i < num_sections && i < 32; i++)
+    {
+        const std::uint64_t sec_va = module_base + sections_rva + i * 40ull;
+        const std::uint64_t sec_pa = memory_manager::translate_guest_virtual_address(
+            guest_cr3, slat_cr3, { .address = sec_va });
+        if (sec_pa == 0) continue;
+
+        const auto* sec = static_cast<const std::uint8_t*>(
+            memory_manager::map_guest_physical(slat_cr3, sec_pa));
+        if (!sec) continue;
+
+        // Section name is first 8 bytes
+        const bool is_text = (sec[0] == '.' && sec[1] == 't' && sec[2] == 'e' &&
+                              sec[3] == 'x' && sec[4] == 't');
+        // Characteristics at offset 36: IMAGE_SCN_CNT_CODE = 0x00000020
+        const std::uint32_t characteristics = *reinterpret_cast<const std::uint32_t*>(sec + 36);
+        const bool is_code = (characteristics & 0x20) != 0;
+
+        if (is_text || (i == 0 && is_code))
+        {
+            // VirtualSize at offset 8, VirtualAddress at offset 12
+            *text_size = *reinterpret_cast<const std::uint32_t*>(sec + 8);
+            *text_va = module_base + *reinterpret_cast<const std::uint32_t*>(sec + 12);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // MmCleanProcessAddressSpace prologue sig (Win11 23H2)
 // 4C 8B DC 49 89 5B ? 49 89 6B ? 49 89 73 ?
 static const std::uint8_t mmclean_pattern[] = {
@@ -1202,14 +1450,67 @@ static const std::uint8_t mmclean_pattern[] = {
 };
 static const char mmclean_mask[] = "xxxxxx?xxx?xxx?";
 static constexpr std::uint32_t mmclean_pattern_len = 15;
-// Displaced count: 4C 8B DC (3) + 49 89 5B xx (4) + 49 89 6B xx (4) + 49 89 73 xx (4) = 15 bytes >= 14
+// Displaced count for CPUID stub: push rcx (1) + mov ecx,imm32 (5) + cpuid (2) = 8 bytes.
+// 4C 8B DC (3) + 49 89 5B xx (4) + 49 89 6B (first byte of next) = need at least 8 bytes.
+// Use 15 bytes (full sig match) for comfortable margin.
 static constexpr std::uint32_t mmclean_displaced_count = 15;
+
+// CPUID stub RCX value: encodes hypercall_info for reserved_data=10, call_type=read_guest_cr3
+// Layout: primary_key=0xA3D8 [15:0], call_type=3 [19:16], secondary_key=0x53 [26:20], reserved_data=10 [31:27]
+// Fits in 32 bits → mov ecx, imm32 (5 bytes) + cpuid (2 bytes) = 7 bytes total.
+static constexpr std::uint32_t mmclean_cpuid_rcx = 0x5533A3D8;
 
 // Hardcoded target process name (bootloader-style — zero usermode dependency)
 static constexpr const char default_target_process[] = "fc26.exe";
 
 // Default PML4 index for hidden region (must match usermode convention: inject.h uses 70)
 static constexpr std::uint64_t default_hidden_pml4_index = 70;
+
+//=============================================================================
+// Boot-time shadow code pages — scan ntoskrnl .text for CC padding pages
+//=============================================================================
+
+void hypercall::setup_shadow_code_pages()
+{
+    if (shadow_code::initialized)
+        return;
+
+    // No serial logging here — this runs on every deferred VMEXIT retry (up to 500x).
+    // Serial wait_tx_ready() blocking at 115200 baud (~87µs/char) inside a VMEXIT handler
+    // causes Hyper-V host stack timeout → triple fault → instant reboot.
+
+    // At boot, target_original_cr3 is 0. Use current guest CR3 for kernel VA translation.
+    const std::uint64_t saved_cr3 = cr3_intercept::target_original_cr3;
+    if (saved_cr3 == 0)
+        cr3_intercept::target_original_cr3 = arch::get_guest_cr3().flags;
+
+    // 1. Find ntoskrnl base via IDT (silent — fails on VTL1/KPTI user CR3)
+    const std::uint64_t ntos_base = find_ntoskrnl_base();
+    if (ntos_base == 0)
+    {
+        cr3_intercept::target_original_cr3 = saved_cr3;
+        return;
+    }
+
+    // 2. Find .text section
+    std::uint64_t text_va = 0, text_size = 0;
+    if (!find_text_section(ntos_base, &text_va, &text_size))
+    {
+        cr3_intercept::target_original_cr3 = saved_cr3;
+        return;
+    }
+
+    // SUCCESS — now safe to log (runs only once)
+    serial::print("shadow_code: ntoskrnl="); serial::print_hex(ntos_base);
+    serial::print(" .text="); serial::print_hex(text_va);
+    serial::print(" size="); serial::print_hex(text_size); serial::println("");
+
+    // 3. Scan .text for CC/NOP padding runs, EPT-split pages containing them
+    shadow_code::init(text_va, text_size, cr3_intercept::target_original_cr3);
+
+    // Restore (boot-time temp CR3 should not persist)
+    cr3_intercept::target_original_cr3 = saved_cr3;
+}
 
 //=============================================================================
 // Boot-time hidden region setup — allocate page table hierarchy for ept_install_hook
@@ -1269,11 +1570,13 @@ void hypercall::setup_hidden_region_boot()
 std::uint64_t hypercall::auto_setup_mmclean_hook()
 {
     // At boot, target_original_cr3 is 0. Use current guest CR3 for kernel VA translation.
+    // KPTI fix already applied by setup_shadow_code_pages() (runs before us).
+    // If that didn't run or target_original_cr3 was restored, re-apply.
     const std::uint64_t saved_cr3 = cr3_intercept::target_original_cr3;
     if (saved_cr3 == 0)
         cr3_intercept::target_original_cr3 = arch::get_guest_cr3().flags;
 
-    // 1. Find ntoskrnl base via IDT
+    // 1. Find ntoskrnl base via IDT (may fail at boot — VTL 1 or KPTI user CR3)
     const std::uint64_t ntos_base = find_ntoskrnl_base();
     if (ntos_base == 0) { cr3_intercept::target_original_cr3 = saved_cr3; return 0; }
 
@@ -1289,7 +1592,8 @@ std::uint64_t hypercall::auto_setup_mmclean_hook()
     if (mmclean_va == 0) { cr3_intercept::target_original_cr3 = saved_cr3; return 0; }
 
     // 4. Install EPT hook (dormant — no VP uses our EPTPs yet)
-    const auto result = setup_mmclean_inline_hook_impl(
+    // Pre-check version: 67B inline shellcode (zero VMEXIT), replaces CPUID stub.
+    const auto result = setup_mmclean_precheck_hook_impl(
         mmclean_va, 0, mmclean_displaced_count);
     if (result != 1) { cr3_intercept::target_original_cr3 = saved_cr3; return 0; }
 
@@ -1456,58 +1760,54 @@ extern "C" __declspec(noinline) __int64 hook_MmCleanProcessAddressSpace(std::uin
 }
 
 //=============================================================================
-// MmAccessFault compiled C++ EPT hook — safety net for hidden memory #PFs
+// MmAccessFault compiled C++ EPT hook — REPLACED by inline 44B shellcode
 //=============================================================================
-
-// Runs in guest ring-0 via hidden region. Zero VMEXIT for non-hidden-memory faults.
-// MmAccessFault(ULONG FaultStatus, PVOID VirtualAddress, KPROCESSOR_MODE PreviousMode, PVOID TrapInformation)
-// x64: RCX=FaultStatus, RDX=VirtualAddress, R8=PreviousMode, R9=TrapInformation
-// Returns __int64 to force MSVC tail-call optimization on the trampoline path.
+// Old version ran in guest ring-0 via hidden region (PML4[70]).
+// New version: 44B position-independent shellcode in ntoskrnl shadow code page.
+// Accessible to ALL processes (kernel VA), no hidden memory dependency.
+// See setup_mmaf_inline_hook_impl() for the new shellcode assembly.
+/*
 extern "C" __declspec(noinline) __int64 hook_MmAccessFault(
     std::uint64_t fault_status, std::uint64_t virtual_address,
     std::uint64_t previous_mode, std::uint64_t trap_information)
 {
-    // Check if faulting VA is in our hidden region (PML4[hidden_index])
+    cr3_intercept::mmaf_hook::total_count++;
     const std::uint8_t pml4_index = static_cast<std::uint8_t>((virtual_address >> 39) & 0x1FF);
-
     if (pml4_index == cr3_intercept::mmaf_hook::hidden_pml4_index)
     {
         cr3_intercept::mmaf_hook::hit_count++;
-
-        // Swap guest CR3 to clone (which has PML4[hidden_index] mapped).
-        // mov cr3 may VMEXIT to Hyper-V (CR3-load exiting) — that's fine,
-        // Hyper-V completes the CR3 switch. 1 VMEXIT per hidden memory fault
-        // is vastly better than 1 VMEXIT per MmAccessFault call (~30K/sec).
         __writecr3(cr3_intercept::mmaf_hook::clone_cr3_value);
-
-        // Return STATUS_SUCCESS (0) — Windows retries the faulting instruction
-        // with the new CR3, which now has PML4[hidden_index] mapped.
         return 0;
     }
-
-    // Not hidden memory — tail-call original MmAccessFault via trampoline.
-    // Compiler emits jmp (not call) because this is the return statement.
     using fn_t = __int64(*)(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
     return reinterpret_cast<fn_t>(cr3_intercept::mmaf_hook::ctx.trampoline_va)(
         fault_status, virtual_address, previous_mode, trap_information);
 }
+*/
 
 //=============================================================================
 // Generic EPT inline hook — ring-1 EptInstallHook equivalent
 //=============================================================================
 
-// Installs an inline EPT hook: shadow page with 14B JMP → detour (hidden region) + trampoline → original.
+// Installs an inline EPT hook: shadow page with JMP → detour (hidden region) + trampoline → original.
 // detour_fn is a compiled C++ function pointer (host VA, auto-converted to hidden VA).
-// displaced_count = number of prologue bytes to relocate (>= 14, instruction-aligned).
+// displaced_count = number of prologue bytes to relocate (instruction-aligned).
+//   - stub_clone_pfn == 0: direct 14B JMP, displaced_count >= 14
+//   - stub_clone_pfn != 0: stub filter (35B), displaced_count >= 35
+// stub_clone_pfn: when nonzero, embeds a CR3 PFN check on the shadow page:
+//   target process (PFN match) → hidden handler, other processes → trampoline (safe).
+//   This allows Hook 2 EPTP re-bootstrap without crashing non-target processes.
 // Returns 1 on success, error code on failure.
 std::uint64_t ept_install_hook(
     std::uint64_t target_va, void* detour_fn,
-    std::uint32_t displaced_count, cr3_intercept::ept_hook_context_t* ctx)
+    std::uint32_t displaced_count, cr3_intercept::ept_hook_context_t* ctx,
+    std::uint32_t stub_clone_pfn)
 {
     if (ctx->active)
         return 0xD0;
 
-    if (displaced_count < 14 || displaced_count > 64)
+    const std::uint32_t min_displaced = (stub_clone_pfn != 0) ? 35 : 14;
+    if (displaced_count < min_displaced || displaced_count > 128)
         return 0xD1;
 
     // 1. Map attachment into hidden region (idempotent)
@@ -1537,6 +1837,7 @@ std::uint64_t ept_install_hook(
     crt::copy_memory(shadow, orig_page, 0x1000);
 
     // 5. Allocate hidden page for trampoline (displaced bytes + 14B JMP back)
+    //    This trampoline is for the TARGET process (accessible via PML4[hidden]).
     const std::uint64_t trampoline_va = alloc_hidden_page_impl();
     if (!trampoline_va) { heap_manager::free_page(shadow); return 0xD5; }
 
@@ -1550,20 +1851,314 @@ std::uint64_t ept_install_hook(
         static_cast<const std::uint8_t*>(orig_page) + page_off, displaced_count);
     build_abs_jmp(tramp_page + displaced_count, target_va + displaced_count);
 
-    // 6. Write 14B JMP on shadow page → detour (hidden region VA)
-    build_abs_jmp(static_cast<std::uint8_t*>(shadow) + page_off, detour_hidden_va);
-    for (std::uint32_t i = 14; i < displaced_count; i++)
-        static_cast<std::uint8_t*>(shadow)[page_off + i] = 0x90;
+    // 6. Write hook on shadow page
+    auto* sp = static_cast<std::uint8_t*>(shadow) + page_off;
+    std::uint32_t hook_byte_len = 14;
+    std::uint32_t pfn_offset_in_page = 0;
+    std::uint64_t cc_tramp_page_off = 0;   // CC trampoline offset in shadow page (0 = none)
+    std::uint32_t cc_tramp_byte_size = 0;  // CC trampoline total size (displaced + 5)
+    void* cc_adj_shadow_out = nullptr;     // adjacent page shadow heap ptr (for context)
+    std::uint64_t cc_adj_pa_out = 0;       // adjacent page target PA (for context)
+
+    if (stub_clone_pfn != 0)
+    {
+        // --- Stub filter mode (35 bytes) ---
+        // Non-target processes: stub → CC trampoline (displaced bytes on kernel page, safe).
+        // Target process: stub → hidden handler (PML4[hidden], only in clone CR3).
+
+        // 6a. Find CC padding on same shadow page for non-target trampoline
+        const std::uint32_t cc_tramp_size = displaced_count + 5; // displaced + E9 rel32 JMP back
+        std::uint64_t cc_off = 0;
+        bool found_cc = false;
+
+        for (std::uint64_t i = 0; i + cc_tramp_size <= 0x1000; i++)
+        {
+            // Skip any candidate overlapping the hook area [page_off, page_off + displaced_count)
+            if (i + cc_tramp_size > page_off && i < page_off + displaced_count) continue;
+
+            bool all_cc = true;
+            for (std::uint32_t j = 0; j < cc_tramp_size; j++)
+            {
+                if (static_cast<std::uint8_t*>(shadow)[i + j] != 0xCC)
+                {
+                    all_cc = false;
+                    break;
+                }
+            }
+            if (all_cc) { cc_off = i; found_cc = true; break; }
+        }
+
+        // 6a-2. If no CC padding on same page, scan adjacent pages using PHYSICAL addresses
+        //        (VA translation can fail; PA ± N*0x1000 always works within ntoskrnl .text)
+        std::uint64_t cc_tramp_va = 0;           // VA of CC trampoline (for stub E9 rel32)
+
+        // Also check for NOP (0x90) padding if no CC found
+        const std::uint8_t pad_bytes[] = { 0xCC, 0x90 };
+
+        if (!found_cc)
+        {
+            // Re-check same page for NOP padding (first scan only checked CC)
+            for (int pb = 1; !found_cc && pb < 2; pb++)
+            {
+                const std::uint8_t pad = pad_bytes[pb];
+                for (std::uint64_t i = 0; i + cc_tramp_size <= 0x1000; i++)
+                {
+                    if (i + cc_tramp_size > page_off && i < page_off + displaced_count) continue;
+
+                    bool all_pad = true;
+                    for (std::uint32_t j = 0; j < cc_tramp_size; j++)
+                    {
+                        if (static_cast<std::uint8_t*>(shadow)[i + j] != pad)
+                        { all_pad = false; break; }
+                    }
+                    if (all_pad) { cc_off = i; found_cc = true; break; }
+                }
+            }
+        }
+
+        // 6a-3. Scan adjacent VIRTUAL pages (±64 pages) — translate VA → PA for each
+        //        ntoskrnl pages are virtually contiguous but NOT physically contiguous,
+        //        so we must walk guest page tables to find the real PA of each neighbor.
+        if (!found_cc)
+        {
+            const std::uint64_t target_va_page = target_va & ~0xFFFull;
+
+            for (int dist = 1; !found_cc && dist <= 64; dist++)
+            {
+                for (int sign = -1; !found_cc && sign <= 1; sign += 2)
+                {
+                    const std::int64_t delta = static_cast<std::int64_t>(sign) * dist;
+                    const std::uint64_t adj_va_base = target_va_page + delta * 0x1000;
+
+                    // Translate adjacent VA → PA via guest page tables
+                    const std::uint64_t adj_pa = memory_manager::translate_guest_virtual_address(
+                        orig_cr3, slat_cr3, { .address = adj_va_base });
+                    if (!adj_pa) continue; // unmapped page — skip
+
+                    const std::uint64_t adj_pa_pg = adj_pa & ~0xFFFull;
+
+                    const auto* adj_orig = static_cast<const std::uint8_t*>(
+                        memory_manager::map_guest_physical(slat_cr3, adj_pa_pg));
+                    if (!adj_orig) continue;
+
+                    // Scan for CC (0xCC) and NOP (0x90) padding
+                    for (int pb = 0; !found_cc && pb < 2; pb++)
+                    {
+                        const std::uint8_t pad = pad_bytes[pb];
+                        for (std::uint64_t i = 0; i + cc_tramp_size <= 0x1000; i++)
+                        {
+                            bool all_pad = true;
+                            for (std::uint32_t j = 0; j < cc_tramp_size; j++)
+                            {
+                                if (adj_orig[i + j] != pad) { all_pad = false; break; }
+                            }
+                            if (!all_pad) continue;
+
+                            // Found padding on adjacent virtual page — create shadow + hook
+                            void* adj_shd = heap_manager::allocate_page();
+                            if (!adj_shd) break;
+                            crt::copy_memory(adj_shd, adj_orig, 0x1000);
+
+                            // Write CC trampoline on adjacent shadow
+                            auto* adj_trp = static_cast<std::uint8_t*>(adj_shd) + i;
+                            crt::copy_memory(adj_trp,
+                                static_cast<const std::uint8_t*>(orig_page) + page_off, displaced_count);
+                            const std::uint64_t resume_va = target_va + displaced_count;
+                            const std::uint64_t adj_jmp_rip = adj_va_base + i + displaced_count + 5;
+                            const std::int32_t adj_jmp_rel = static_cast<std::int32_t>(
+                                static_cast<std::int64_t>(resume_va) - static_cast<std::int64_t>(adj_jmp_rip));
+                            adj_trp[displaced_count] = 0xE9;
+                            *reinterpret_cast<std::int32_t*>(adj_trp + displaced_count + 1) = adj_jmp_rel;
+
+                            // EPT hook adjacent page (execute → adj shadow, read/write → original)
+                            const std::uint64_t adj_shd_pa = memory_manager::unmap_host_physical(adj_shd);
+                            unhide_physical_page(slat_cr3, adj_shd_pa);
+                            if (slat::hook::add({ .address = adj_pa_pg }, { .address = adj_shd_pa }, 0) == 0)
+                            {
+                                heap_manager::free_page(adj_shd);
+                                break;
+                            }
+
+                            cc_tramp_va = adj_va_base + i;
+                            cc_adj_shadow_out = adj_shd;
+                            cc_adj_pa_out = adj_pa_pg;
+                            found_cc = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* ---- FALLBACK: Scan adjacent PHYSICAL pages (±64 pages) ----
+         * Kept as fallback in case virtual translation fails for all neighbors.
+         * Original code assumed physical contiguity (ntoskrnl .text is NOT always
+         * physically contiguous), so the virtual scan above is the primary method.
+         */
+        if (!found_cc)
+        {
+            // Scan adjacent physical pages (±64 pages) — no VA translation needed
+            // ntoskrnl .text is linearly mapped: adj_va = target_va + (adj_pa - target_pa)
+            const std::uint64_t base_va = target_va - page_off;
+
+            for (int dist = 1; !found_cc && dist <= 64; dist++)
+            {
+                for (int sign = -1; !found_cc && sign <= 1; sign += 2)
+                {
+                    const std::int64_t delta = static_cast<std::int64_t>(sign) * dist;
+                    if (delta < 0 && pa_page < static_cast<std::uint64_t>(-delta) * 0x1000) continue;
+                    const std::uint64_t adj_pa_pg = pa_page + delta * 0x1000;
+                    const std::uint64_t adj_va_base = base_va + delta * 0x1000;
+
+                    const auto* adj_orig = static_cast<const std::uint8_t*>(
+                        memory_manager::map_guest_physical(slat_cr3, adj_pa_pg));
+                    if (!adj_orig) continue;
+
+                    // Scan for CC (0xCC) and NOP (0x90) padding
+                    for (int pb = 0; !found_cc && pb < 2; pb++)
+                    {
+                        const std::uint8_t pad = pad_bytes[pb];
+                        for (std::uint64_t i = 0; i + cc_tramp_size <= 0x1000; i++)
+                        {
+                            bool all_pad = true;
+                            for (std::uint32_t j = 0; j < cc_tramp_size; j++)
+                            {
+                                if (adj_orig[i + j] != pad) { all_pad = false; break; }
+                            }
+                            if (!all_pad) continue;
+
+                            // Found padding on adjacent page — create shadow + hook
+                            void* adj_shd = heap_manager::allocate_page();
+                            if (!adj_shd) break;
+                            crt::copy_memory(adj_shd, adj_orig, 0x1000);
+
+                            // Write CC trampoline on adjacent shadow
+                            auto* adj_trp = static_cast<std::uint8_t*>(adj_shd) + i;
+                            crt::copy_memory(adj_trp,
+                                static_cast<const std::uint8_t*>(orig_page) + page_off, displaced_count);
+                            const std::uint64_t resume_va = target_va + displaced_count;
+                            const std::uint64_t adj_jmp_rip = adj_va_base + i + displaced_count + 5;
+                            const std::int32_t adj_jmp_rel = static_cast<std::int32_t>(
+                                static_cast<std::int64_t>(resume_va) - static_cast<std::int64_t>(adj_jmp_rip));
+                            adj_trp[displaced_count] = 0xE9;
+                            *reinterpret_cast<std::int32_t*>(adj_trp + displaced_count + 1) = adj_jmp_rel;
+
+                            // EPT hook adjacent page (execute → adj shadow, read/write → original)
+                            const std::uint64_t adj_shd_pa = memory_manager::unmap_host_physical(adj_shd);
+                            unhide_physical_page(slat_cr3, adj_shd_pa);
+                            if (slat::hook::add({ .address = adj_pa_pg }, { .address = adj_shd_pa }, 0) == 0)
+                            {
+                                heap_manager::free_page(adj_shd);
+                                break;
+                            }
+
+                            cc_tramp_va = adj_va_base + i;
+                            cc_adj_shadow_out = adj_shd;
+                            cc_adj_pa_out = adj_pa_pg;
+                            found_cc = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!found_cc)
+        {
+            hpt[tramp_slot].flags = 0;
+            heap_manager::free_page(tramp_page);
+            heap_manager::free_page(shadow);
+            return 0xDA; // no CC/NOP padding found within ±64 physical pages
+        }
+
+        // 6b. Write CC trampoline on same-page shadow (if found on same page)
+        if (cc_tramp_va == 0)
+        {
+            // Same page — write CC trampoline directly on shadow
+            auto* cc_tramp = static_cast<std::uint8_t*>(shadow) + cc_off;
+            crt::copy_memory(cc_tramp,
+                static_cast<const std::uint8_t*>(orig_page) + page_off, displaced_count);
+
+            const std::uint64_t resume_va = target_va + displaced_count;
+            const std::uint64_t jmp_back_rip = (target_va - page_off) + cc_off + displaced_count + 5;
+            const std::int32_t jmp_back_rel = static_cast<std::int32_t>(
+                static_cast<std::int64_t>(resume_va) - static_cast<std::int64_t>(jmp_back_rip));
+            cc_tramp[displaced_count] = 0xE9;
+            *reinterpret_cast<std::int32_t*>(cc_tramp + displaced_count + 1) = jmp_back_rel;
+
+            cc_tramp_va = (target_va - page_off) + cc_off;
+            cc_tramp_page_off = cc_off;
+            cc_tramp_byte_size = cc_tramp_size;
+        }
+        // Adjacent page CC trampoline was already written in the scan loop above.
+
+        // 6c. Write 35-byte stub on shadow page
+        // [0]:  push rax                (50)
+        // [1]:  mov rax, cr3            (0F 20 D8)
+        // [4]:  shr rax, 12             (48 C1 E8 0C)
+        // [8]:  cmp eax, CLONE_PFN      (3D xx xx xx xx)
+        // [13]: pop rax                 (58)
+        // [14]: jne .not_target         (75 0E)
+        // [16]: <14B JMP hidden handler>
+        // [30]: .not_target: E9 rel32 → CC trampoline
+        sp[0] = 0x50;                                  // push rax
+        sp[1] = 0x0F; sp[2] = 0x20; sp[3] = 0xD8;     // mov rax, cr3
+        sp[4] = 0x48; sp[5] = 0xC1; sp[6] = 0xE8; sp[7] = 0x0C; // shr rax, 12
+        sp[8] = 0x3D;                                  // cmp eax, imm32
+        *reinterpret_cast<std::uint32_t*>(sp + 9) = stub_clone_pfn;
+        sp[13] = 0x58;                                 // pop rax
+        sp[14] = 0x75; sp[15] = 0x0E;                  // jne +14 (skip 14B JMP)
+
+        build_abs_jmp(sp + 16, detour_hidden_va);      // [16..29] target: JMP hidden handler
+
+        // [30..34] not_target: E9 rel32 → CC trampoline (same or adjacent page)
+        const std::uint64_t jne_rip = target_va + 35;  // RIP after E9 rel32
+        const std::int32_t jne_rel = static_cast<std::int32_t>(
+            static_cast<std::int64_t>(cc_tramp_va) - static_cast<std::int64_t>(jne_rip));
+        sp[30] = 0xE9;
+        *reinterpret_cast<std::int32_t*>(sp + 31) = jne_rel;
+
+        // NOP padding after stub
+        for (std::uint32_t i = 35; i < displaced_count; i++)
+            sp[i] = 0x90;
+
+        hook_byte_len = displaced_count;
+        pfn_offset_in_page = static_cast<std::uint32_t>(page_off) + 9; // offset of imm32 in shadow page
+    }
+    else
+    {
+        // --- Direct mode (14 bytes) --- original behavior
+        build_abs_jmp(sp, detour_hidden_va);
+        for (std::uint32_t i = 14; i < displaced_count; i++)
+            sp[i] = 0x90;
+    }
 
     // 7. EPT split: execute → shadow, read → original
     const std::uint64_t shadow_pa = memory_manager::unmap_host_physical(shadow);
     unhide_physical_page(slat_cr3, shadow_pa);
-    if (slat::hook::add({ .address = target_pa }, { .address = shadow_pa }, 14) == 0)
+    if (slat::hook::add({ .address = target_pa }, { .address = shadow_pa }, hook_byte_len) == 0)
     {
+        // Clean up adjacent page EPT hook if it was installed
+        if (cc_adj_pa_out != 0)
+        {
+            slat::hook::remove({ .address = cc_adj_pa_out });
+            heap_manager::free_page(cc_adj_shadow_out);
+        }
         hpt[tramp_slot].flags = 0;
         heap_manager::free_page(tramp_page);
         heap_manager::free_page(shadow);
         return 0xD7;
+    }
+
+    // 7b. Protect CC trampoline area from MTF write sync (same-page only)
+    if (cc_tramp_byte_size != 0)
+    {
+        slat::hook::entry_t* entry = slat::hook::entry_t::find(target_pa >> 12);
+        if (entry != nullptr)
+        {
+            entry->set_hook_byte_offset2(cc_tramp_page_off);
+            entry->set_hook_byte_length2(cc_tramp_byte_size < 127 ? cc_tramp_byte_size : 127);
+        }
     }
 
     // 8. Fill context
@@ -1573,6 +2168,10 @@ std::uint64_t ept_install_hook(
     ctx->shadow_heap_va = shadow;
     ctx->trampoline_va = trampoline_va;
     ctx->trampoline_hidden_slot = tramp_slot;
+    ctx->stub_pfn_offset = pfn_offset_in_page;
+    ctx->displaced_count = displaced_count;
+    ctx->cc_adj_target_pa = cc_adj_pa_out;
+    ctx->cc_adj_shadow_heap_va = cc_adj_shadow_out;
 
     return 1;
 }
@@ -1601,12 +2200,298 @@ void ept_remove_hook(cr3_intercept::ept_hook_context_t* ctx)
         }
     }
 
+    // Remove adjacent page CC trampoline shadow (if any)
+    if (ctx->cc_adj_target_pa != 0)
+    {
+        slat::hook::remove({ .address = ctx->cc_adj_target_pa });
+        if (ctx->cc_adj_shadow_heap_va)
+            heap_manager::free_page(ctx->cc_adj_shadow_heap_va);
+    }
+
     ctx->active = false;
     ctx->target_va = 0;
     ctx->target_pa_page = 0;
     ctx->shadow_heap_va = nullptr;
     ctx->trampoline_va = 0;
     ctx->trampoline_hidden_slot = 0xFFFF;
+    ctx->stub_pfn_offset = 0;
+    ctx->displaced_count = 0;
+    ctx->cc_adj_target_pa = 0;
+    ctx->cc_adj_shadow_heap_va = nullptr;
+}
+
+//=============================================================================
+// CPUID-based EPT hook — safe for ALL processes (no hidden region dependency)
+//=============================================================================
+//
+// Shadow page gets a 7-byte CPUID stub: mov ecx, imm32; cpuid
+// CPUID VMEXIT → existing hypercall dispatch → handler processes the hook.
+// CC trampoline (displaced bytes + E9 JMP back) on same or adjacent page.
+// Any process can safely execute the stub: CPUID triggers VMEXIT, handler
+// checks CR3 PFN and redirects to trampoline. No PML4[hidden] dependency.
+//
+std::uint64_t ept_install_cpuid_hook(
+    std::uint64_t target_va,
+    std::uint32_t displaced_count,
+    cr3_intercept::ept_hook_context_t* ctx,
+    std::uint32_t cpuid_rcx_imm32)
+{
+    if (ctx->active)
+        return 0xD0;
+
+    if (displaced_count < 8 || displaced_count > 128)
+        return 0xD1;
+
+    // 1. Translate target VA → PA
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+    const cr3 orig_cr3 = get_guest_cr3_for_translation();
+    const std::uint64_t target_pa = memory_manager::translate_guest_virtual_address(
+        orig_cr3, slat_cr3, { .address = target_va });
+    if (!target_pa) return 0xD2;
+
+    const std::uint64_t page_off = target_pa & 0xFFF;
+    const std::uint64_t pa_page = target_pa & ~0xFFFull;
+    if (page_off + displaced_count > 0x1000) return 0xD3;
+
+    // 2. Shadow page: copy original
+    void* shadow = heap_manager::allocate_page();
+    if (!shadow) return 0xD4;
+    const void* orig_page = memory_manager::map_guest_physical(slat_cr3, pa_page);
+    if (!orig_page) { heap_manager::free_page(shadow); return 0xD4; }
+    crt::copy_memory(shadow, orig_page, 0x1000);
+
+    // 3. Find CC/NOP padding for trampoline (1 + displaced_count + 5 bytes)
+    //    pop rcx (1) + displaced bytes + rel32 JMP back (5)
+    const std::uint32_t cc_tramp_size = 1 + displaced_count + 5;
+    std::uint64_t cc_off = 0;
+    bool found_cc = false;
+    std::uint64_t cc_tramp_va = 0;
+    void* cc_adj_shadow_out = nullptr;
+    std::uint64_t cc_adj_pa_out = 0;
+    std::uint64_t cc_tramp_page_off_out = 0;
+    std::uint32_t cc_tramp_byte_size_out = 0;
+
+    const std::uint8_t pad_bytes[] = { 0xCC, 0x90 };
+
+    // 3a. Same-page scan (CC then NOP)
+    for (int pb = 0; !found_cc && pb < 2; pb++)
+    {
+        const std::uint8_t pad = pad_bytes[pb];
+        for (std::uint64_t i = 0; i + cc_tramp_size <= 0x1000; i++)
+        {
+            if (i + cc_tramp_size > page_off && i < page_off + displaced_count) continue;
+            bool all_pad = true;
+            for (std::uint32_t j = 0; j < cc_tramp_size; j++)
+            {
+                if (static_cast<std::uint8_t*>(shadow)[i + j] != pad)
+                { all_pad = false; break; }
+            }
+            if (all_pad) { cc_off = i; found_cc = true; break; }
+        }
+    }
+
+    // 3b. Adjacent virtual page scan (±64 pages)
+    if (!found_cc)
+    {
+        const std::uint64_t target_va_page = target_va & ~0xFFFull;
+        for (int dist = 1; !found_cc && dist <= 64; dist++)
+        {
+            for (int sign = -1; !found_cc && sign <= 1; sign += 2)
+            {
+                const std::int64_t delta = static_cast<std::int64_t>(sign) * dist;
+                const std::uint64_t adj_va_base = target_va_page + delta * 0x1000;
+                const std::uint64_t adj_pa = memory_manager::translate_guest_virtual_address(
+                    orig_cr3, slat_cr3, { .address = adj_va_base });
+                if (!adj_pa) continue;
+                const std::uint64_t adj_pa_pg = adj_pa & ~0xFFFull;
+                const auto* adj_orig = static_cast<const std::uint8_t*>(
+                    memory_manager::map_guest_physical(slat_cr3, adj_pa_pg));
+                if (!adj_orig) continue;
+
+                for (int pb = 0; !found_cc && pb < 2; pb++)
+                {
+                    const std::uint8_t pad = pad_bytes[pb];
+                    for (std::uint64_t i = 0; i + cc_tramp_size <= 0x1000; i++)
+                    {
+                        bool all_pad = true;
+                        for (std::uint32_t j = 0; j < cc_tramp_size; j++)
+                        {
+                            if (adj_orig[i + j] != pad) { all_pad = false; break; }
+                        }
+                        if (!all_pad) continue;
+
+                        void* adj_shd = heap_manager::allocate_page();
+                        if (!adj_shd) break;
+                        crt::copy_memory(adj_shd, adj_orig, 0x1000);
+
+                        auto* adj_trp = static_cast<std::uint8_t*>(adj_shd) + i;
+                        adj_trp[0] = 0x59; // pop rcx
+                        crt::copy_memory(adj_trp + 1,
+                            static_cast<const std::uint8_t*>(orig_page) + page_off, displaced_count);
+                        const std::uint64_t resume_va = target_va + displaced_count;
+                        const std::uint64_t adj_jmp_rip = adj_va_base + i + 1 + displaced_count + 5;
+                        const std::int32_t adj_jmp_rel = static_cast<std::int32_t>(
+                            static_cast<std::int64_t>(resume_va) - static_cast<std::int64_t>(adj_jmp_rip));
+                        adj_trp[1 + displaced_count] = 0xE9;
+                        *reinterpret_cast<std::int32_t*>(adj_trp + 1 + displaced_count + 1) = adj_jmp_rel;
+
+                        const std::uint64_t adj_shd_pa = memory_manager::unmap_host_physical(adj_shd);
+                        unhide_physical_page(slat_cr3, adj_shd_pa);
+                        if (slat::hook::add({ .address = adj_pa_pg }, { .address = adj_shd_pa }, 0) == 0)
+                        {
+                            heap_manager::free_page(adj_shd);
+                            break;
+                        }
+
+                        cc_tramp_va = adj_va_base + i;
+                        cc_adj_shadow_out = adj_shd;
+                        cc_adj_pa_out = adj_pa_pg;
+                        found_cc = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3c. Adjacent physical page scan (fallback, ±64 pages)
+    if (!found_cc)
+    {
+        const std::uint64_t base_va = target_va - page_off;
+        for (int dist = 1; !found_cc && dist <= 64; dist++)
+        {
+            for (int sign = -1; !found_cc && sign <= 1; sign += 2)
+            {
+                const std::int64_t delta = static_cast<std::int64_t>(sign) * dist;
+                if (delta < 0 && pa_page < static_cast<std::uint64_t>(-delta) * 0x1000) continue;
+                const std::uint64_t adj_pa_pg = pa_page + delta * 0x1000;
+                const std::uint64_t adj_va_base = base_va + delta * 0x1000;
+                const auto* adj_orig = static_cast<const std::uint8_t*>(
+                    memory_manager::map_guest_physical(slat_cr3, adj_pa_pg));
+                if (!adj_orig) continue;
+
+                for (int pb = 0; !found_cc && pb < 2; pb++)
+                {
+                    const std::uint8_t pad = pad_bytes[pb];
+                    for (std::uint64_t i = 0; i + cc_tramp_size <= 0x1000; i++)
+                    {
+                        bool all_pad = true;
+                        for (std::uint32_t j = 0; j < cc_tramp_size; j++)
+                        {
+                            if (adj_orig[i + j] != pad) { all_pad = false; break; }
+                        }
+                        if (!all_pad) continue;
+
+                        void* adj_shd = heap_manager::allocate_page();
+                        if (!adj_shd) break;
+                        crt::copy_memory(adj_shd, adj_orig, 0x1000);
+
+                        auto* adj_trp = static_cast<std::uint8_t*>(adj_shd) + i;
+                        adj_trp[0] = 0x59; // pop rcx
+                        crt::copy_memory(adj_trp + 1,
+                            static_cast<const std::uint8_t*>(orig_page) + page_off, displaced_count);
+                        const std::uint64_t resume_va = target_va + displaced_count;
+                        const std::uint64_t adj_jmp_rip = adj_va_base + i + 1 + displaced_count + 5;
+                        const std::int32_t adj_jmp_rel = static_cast<std::int32_t>(
+                            static_cast<std::int64_t>(resume_va) - static_cast<std::int64_t>(adj_jmp_rip));
+                        adj_trp[1 + displaced_count] = 0xE9;
+                        *reinterpret_cast<std::int32_t*>(adj_trp + 1 + displaced_count + 1) = adj_jmp_rel;
+
+                        const std::uint64_t adj_shd_pa = memory_manager::unmap_host_physical(adj_shd);
+                        unhide_physical_page(slat_cr3, adj_shd_pa);
+                        if (slat::hook::add({ .address = adj_pa_pg }, { .address = adj_shd_pa }, 0) == 0)
+                        {
+                            heap_manager::free_page(adj_shd);
+                            break;
+                        }
+
+                        cc_tramp_va = adj_va_base + i;
+                        cc_adj_shadow_out = adj_shd;
+                        cc_adj_pa_out = adj_pa_pg;
+                        found_cc = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!found_cc)
+    {
+        heap_manager::free_page(shadow);
+        return 0xDA;
+    }
+
+    // 4. Write same-page CC trampoline (if found on same page)
+    //    pop rcx (1) + displaced bytes + JMP back (5)
+    if (cc_tramp_va == 0)
+    {
+        auto* cc_tramp = static_cast<std::uint8_t*>(shadow) + cc_off;
+        cc_tramp[0] = 0x59; // pop rcx — restore original RCX saved by push rcx in stub
+        crt::copy_memory(cc_tramp + 1,
+            static_cast<const std::uint8_t*>(orig_page) + page_off, displaced_count);
+        const std::uint64_t resume_va = target_va + displaced_count;
+        const std::uint64_t jmp_back_rip = (target_va - page_off) + cc_off + 1 + displaced_count + 5;
+        const std::int32_t jmp_back_rel = static_cast<std::int32_t>(
+            static_cast<std::int64_t>(resume_va) - static_cast<std::int64_t>(jmp_back_rip));
+        cc_tramp[1 + displaced_count] = 0xE9;
+        *reinterpret_cast<std::int32_t*>(cc_tramp + 1 + displaced_count + 1) = jmp_back_rel;
+        cc_tramp_va = (target_va - page_off) + cc_off;
+        cc_tramp_page_off_out = cc_off;
+        cc_tramp_byte_size_out = cc_tramp_size;
+    }
+
+    // 5. Write CPUID stub on shadow page (8 bytes)
+    //    push rcx         (51)              — 1 byte  (save original RCX = EPROCESS etc.)
+    //    mov ecx, imm32   (B9 xx xx xx xx)  — 5 bytes (hypercall key)
+    //    cpuid             (0F A2)           — 2 bytes (VMEXIT → handler redirects RIP)
+    //    NOP fill to displaced_count (dead code — CPUID VMEXIT redirects RIP)
+    auto* sp = static_cast<std::uint8_t*>(shadow) + page_off;
+    sp[0] = 0x51; // push rcx
+    sp[1] = 0xB9;
+    *reinterpret_cast<std::uint32_t*>(sp + 2) = cpuid_rcx_imm32;
+    sp[6] = 0x0F; sp[7] = 0xA2;
+    for (std::uint32_t i = 8; i < displaced_count; i++)
+        sp[i] = 0x90;
+
+    // 6. EPT split: execute → shadow, read/write → original
+    const std::uint64_t shadow_pa = memory_manager::unmap_host_physical(shadow);
+    unhide_physical_page(slat_cr3, shadow_pa);
+    if (slat::hook::add({ .address = target_pa }, { .address = shadow_pa }, displaced_count) == 0)
+    {
+        if (cc_adj_pa_out != 0)
+        {
+            slat::hook::remove({ .address = cc_adj_pa_out });
+            heap_manager::free_page(cc_adj_shadow_out);
+        }
+        heap_manager::free_page(shadow);
+        return 0xD7;
+    }
+
+    // 6b. Protect CC trampoline from MTF write sync (same-page only)
+    if (cc_tramp_byte_size_out != 0)
+    {
+        slat::hook::entry_t* entry = slat::hook::entry_t::find(target_pa >> 12);
+        if (entry != nullptr)
+        {
+            entry->set_hook_byte_offset2(cc_tramp_page_off_out);
+            entry->set_hook_byte_length2(cc_tramp_byte_size_out < 127 ? cc_tramp_byte_size_out : 127);
+        }
+    }
+
+    // 7. Fill context — no hidden trampoline (trampoline_hidden_slot = 0xFFFF)
+    ctx->active = true;
+    ctx->target_va = target_va;
+    ctx->target_pa_page = pa_page;
+    ctx->shadow_heap_va = shadow;
+    ctx->trampoline_va = cc_tramp_va;
+    ctx->trampoline_hidden_slot = 0xFFFF;
+    ctx->stub_pfn_offset = 0;
+    ctx->displaced_count = displaced_count;
+    ctx->cc_adj_target_pa = cc_adj_pa_out;
+    ctx->cc_adj_shadow_heap_va = cc_adj_shadow_out;
+
+    return 1;
 }
 
 //=============================================================================
@@ -1672,21 +2557,28 @@ std::uint64_t sig_scan_guest_pages(
     return 0;
 }
 
-// MmClean hook setup — thin wrapper, arms cleanup after generic install
+// MmClean hook setup — CPUID mode (Option A).
+// Shadow page has 7-byte CPUID stub. CPUID VMEXIT handler (reserved_data=10)
+// checks CR3 PFN and sets cleanup_pending for target process.
+// Safe for ALL processes: any process calling MmClean → CPUID → VMEXIT → handler
+// → non-target: passthrough via trampoline, target: cleanup_pending + trampoline.
+// No hidden region dependency, no PML4[hidden] required.
 std::uint64_t setup_mmclean_inline_hook_impl(
     std::uint64_t target_va, std::uint64_t target_eprocess, std::uint32_t displaced_count)
 {
     if (cr3_intercept::mmclean_hook::ctx.active)
     {
-        // Hook already installed (permanent) — just re-arm with new target
+        // CPUID hook already installed (boot or previous attach).
+        // Just re-arm with new EPROCESS target. No reinstall needed.
         cr3_intercept::cleanup_hook::target_eprocess = target_eprocess;
         cr3_intercept::cleanup_hook::armed = 1;
         return 1;
     }
 
-    const auto result = ept_install_hook(
-        target_va, reinterpret_cast<void*>(&hook_MmCleanProcessAddressSpace),
-        displaced_count, &cr3_intercept::mmclean_hook::ctx);
+    // CPUID mode: mov ecx, imm32; cpuid (7 bytes) — no hidden region, no stub filter.
+    // Uses existing hypercall dispatch: reserved_data=10 handler does CR3 PFN matching.
+    const auto result = ept_install_cpuid_hook(
+        target_va, displaced_count, &cr3_intercept::mmclean_hook::ctx, mmclean_cpuid_rcx);
 
     if (result == 1)
     {
@@ -1697,7 +2589,234 @@ std::uint64_t setup_mmclean_inline_hook_impl(
     return result;
 }
 
-// MmAccessFault hook setup — thin wrapper, arms safety net after generic install
+//=============================================================================
+// MmClean hook setup — inline pre-check version (zero VMEXIT).
+//=============================================================================
+//
+// 67-byte position-independent shellcode on ntoskrnl shadow code page:
+//   - Load first 8 bytes of ImageFileName from EPROCESS ([RCX + IFN_OFFSET])
+//   - OR with 0x2020... (case-insensitive ASCII)
+//   - Compare with embedded target name qword
+//   - Match → 14B abs JMP to compiled C++ handler in hidden region (PML4[hidden])
+//   - No match → 14B abs JMP to trampoline (displaced prologue + JMP back)
+//
+// ALL data as immediates — zero memory reads from shadow page = zero self-read.
+// Non-target processes: zero VMEXIT (JMP trampoline → original MmClean).
+// Target process: zero VMEXIT (JMP hook_MmCleanProcessAddressSpace → compiled C++).
+//
+// At boot: installed with TARGET_NAME_QWORD=0 (dormant). Re-armed at attach
+// when map_attachment_to_hidden_region() has been called and target name is set.
+//
+std::uint64_t setup_mmclean_precheck_hook_impl(
+    std::uint64_t target_va, std::uint64_t target_eprocess, std::uint32_t displaced_count)
+{
+    auto& ctx = cr3_intercept::mmclean_hook::ctx;
+
+    if (ctx.active)
+    {
+        // Re-arm: patch immediates in pre-check shellcode.
+        auto* sc = static_cast<std::uint8_t*>(cr3_intercept::mmclean_hook::precheck_host_va);
+        if (!sc) return 0;
+
+        // Ensure attachment PE is mapped into hidden region for hidden_detour_va
+        if (!cr3_intercept::attachment_mapping::mapped)
+            map_attachment_to_hidden_region();
+
+        // Abort re-arm if mapping failed — can't compute hidden_detour_va,
+        // enabling the name match would JMP to address 0 → crash.
+        if (!cr3_intercept::attachment_mapping::mapped)
+            return 0;
+
+        // 1. Patch IFN offset at [5..8]
+        *reinterpret_cast<std::uint32_t*>(sc + 5) = cr3_intercept::mmclean_hook::imagefile_name_offset;
+
+        // 2. Patch hidden_detour_va FIRST at [40..43] and [48..51].
+        //    Must be valid BEFORE TARGET_NAME_QWORD is written, otherwise a concurrent
+        //    VP executing MmClean could name-match and JMP to stale detour_va (0 at boot).
+        const std::uint64_t detour_va = host_va_to_hidden_va(
+            reinterpret_cast<std::uint64_t>(&hook_MmCleanProcessAddressSpace));
+        *reinterpret_cast<std::uint32_t*>(sc + 40) = static_cast<std::uint32_t>(detour_va);
+        *reinterpret_cast<std::uint32_t*>(sc + 48) = static_cast<std::uint32_t>(detour_va >> 32);
+
+        serial::reinit();  // reclaim COM1 from VMX root (serial.sys may have reconfigured)
+        serial::print("mmclean: detour_va="); serial::print_hex(detour_va); serial::println("");
+
+        // 3. NOW patch TARGET_NAME_QWORD at [24..31] — enables name matching.
+        //    Safe: detour_va is already valid above.
+        //    Same OR logic as the shellcode: each byte |= 0x20 (case-insensitive ASCII).
+        //    Null bytes → 0x20 (never matches real ImageFileName OR'd with 0x20).
+        const char* name = cr3_intercept::cleanup_hook::target_process_name;
+        std::uint8_t raw[8] = {};
+        for (int i = 0; i < 8 && name[i]; i++)
+            raw[i] = static_cast<std::uint8_t>(name[i]);
+        for (int i = 0; i < 8; i++)
+            raw[i] |= 0x20;
+        std::uint64_t name_qword = 0;
+        crt::copy_memory(&name_qword, raw, 8);
+        *reinterpret_cast<std::uint64_t*>(sc + 24) = name_qword;
+
+        cr3_intercept::cleanup_hook::target_eprocess = target_eprocess;
+        cr3_intercept::cleanup_hook::armed = 1;
+
+        serial::print("mmclean: precheck re-armed, name_qword="); serial::print_hex(name_qword); serial::println("");
+        return 1;
+    }
+
+    serial::println("mmclean: setup_mmclean_precheck_hook_impl (first install)");
+
+    // Pre-check uses 14B abs JMP at prologue — force minimum displaced_count.
+    if (displaced_count < mmclean_displaced_count)
+        displaced_count = mmclean_displaced_count;
+
+    // shadow_code must be initialized by deferred init in Hook 2 (before enable_cr3_intercept).
+    // Do NOT retry here — EPT-splitting pages in hook_cr3 while VPs are active causes double faults.
+    if (!shadow_code::initialized)
+    {
+        serial::println("mmclean: shadow_code not initialized (deferred init failed?)");
+        return 0xE000;
+    }
+    if (shadow_code::region_count == 0)
+    {
+        serial::println("mmclean: shadow_code initialized but 0 regions");
+        return 0xE001; // init ran but found nothing
+    }
+
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+    const cr3 orig_cr3 = get_guest_cr3_for_translation();
+
+    // 1. Translate target VA → PA, read original prologue
+    const std::uint64_t target_pa = memory_manager::translate_guest_virtual_address(
+        orig_cr3, slat_cr3, { .address = target_va });
+    if (!target_pa) return 0xF2;
+
+    const std::uint64_t page_off = target_pa & 0xFFF;
+    const std::uint64_t pa_page = target_pa & ~0xFFFull;
+
+    // Guard: 14B JMP must fit within the page
+    if (page_off + 14 > 0x1000) return 0xF8;
+
+    const auto* orig_page = static_cast<const std::uint8_t*>(
+        memory_manager::map_guest_physical(slat_cr3, pa_page));
+    if (!orig_page) return 0xF3;
+
+    // 2. Allocate precheck (67B) and trampoline from shadow_code pool (any ntoskrnl .text page)
+    constexpr std::uint32_t precheck_size = 67;
+
+    void* precheck_host = nullptr;
+    const std::uint64_t precheck_va = shadow_code::alloc(precheck_size, &precheck_host);
+    if (!precheck_va) return 0xE100 | static_cast<std::uint8_t>(shadow_code::region_count);
+
+    const std::uint64_t trampoline_va = shadow_code::alloc_trampoline(
+        orig_page + page_off, displaced_count, target_va + displaced_count);
+    if (!trampoline_va) return 0xE400 | static_cast<std::uint8_t>(shadow_code::region_count);
+
+    // 3. Assemble 67-byte pre-check shellcode into shadow_code allocation
+    //
+    // Layout:
+    //   [0]  push rax
+    //   [1]  push rdx
+    //   [2]  mov rax, [rcx + IFN_OFFSET]        ; 48 8B 81 [5..8]=disp32
+    //   [9]  movabs rdx, 0x2020202020202020      ; 48 BA [11..18]=imm64
+    //   [19] or rax, rdx                         ; 48 0B C2
+    //   [22] movabs rdx, TARGET_NAME_QWORD       ; 48 BA [24..31]=imm64
+    //   [32] cmp rax, rdx                        ; 48 3B C2
+    //   [35] pop rdx
+    //   [36] pop rax
+    //   [37] jne .passthrough                    ; 75 0E (+14 → offset 53)
+    //   [39] 14B abs JMP → hidden_detour_va      ; [40..43]=low32, [48..51]=high32
+    //   [53] 14B abs JMP → trampoline_va         ; [54..57]=low32, [62..65]=high32
+    //   Total: 67 bytes
+    //
+    auto* sc = static_cast<std::uint8_t*>(precheck_host);
+    int pos = 0;
+
+    sc[pos++] = 0x50; // push rax
+    sc[pos++] = 0x52; // push rdx
+    // mov rax, [rcx + IFN_OFFSET]
+    sc[pos++] = 0x48; sc[pos++] = 0x8B; sc[pos++] = 0x81;
+    *reinterpret_cast<std::uint32_t*>(sc + pos) = cr3_intercept::mmclean_hook::imagefile_name_offset;
+    pos += 4; // pos = 9
+    // movabs rdx, 0x2020202020202020
+    sc[pos++] = 0x48; sc[pos++] = 0xBA;
+    *reinterpret_cast<std::uint64_t*>(sc + pos) = 0x2020202020202020ull;
+    pos += 8; // pos = 19
+    // or rax, rdx
+    sc[pos++] = 0x48; sc[pos++] = 0x0B; sc[pos++] = 0xC2; // pos = 22
+    // movabs rdx, TARGET_NAME_QWORD — dormant: 0 (never matches OR'd name)
+    sc[pos++] = 0x48; sc[pos++] = 0xBA;
+    *reinterpret_cast<std::uint64_t*>(sc + pos) = 0; // dormant at boot
+    pos += 8; // pos = 32
+    // cmp rax, rdx
+    sc[pos++] = 0x48; sc[pos++] = 0x3B; sc[pos++] = 0xC2; // pos = 35
+    sc[pos++] = 0x5A; // pop rdx
+    sc[pos++] = 0x58; // pop rax
+    // jne .passthrough (+14 → offset 53)
+    sc[pos++] = 0x75;
+    sc[pos++] = 0x0E; // pos = 39
+
+    // Match path: 14B abs JMP to hidden_detour_va (dormant: 0)
+    build_abs_jmp(sc + pos, 0);
+    pos += 14; // pos = 53
+
+    // .passthrough: 14B abs JMP to trampoline_va
+    build_abs_jmp(sc + pos, trampoline_va);
+    pos += 14; // pos = 67
+
+    serial::print("mmclean: precheck "); serial::print_dec(pos); serial::println("B assembled");
+
+    // 4. Allocate shadow page for MmClean function itself (14B JMP at prologue)
+    void* mmclean_shadow = heap_manager::allocate_page();
+    if (!mmclean_shadow) return 0xF6;
+    crt::copy_memory(mmclean_shadow, orig_page, 0x1000);
+
+    // Write 14B absolute JMP at prologue → pre-check handler
+    auto* prologue = static_cast<std::uint8_t*>(mmclean_shadow) + page_off;
+    build_abs_jmp(prologue, precheck_va);
+
+    // 5. EPT-split MmClean page: execute → shadow (--X), read/write → original
+    const std::uint64_t shadow_pa = memory_manager::unmap_host_physical(mmclean_shadow);
+    unhide_physical_page(slat_cr3, shadow_pa);
+
+    if (slat::hook::add({ .address = target_pa }, { .address = shadow_pa }, 14) == 0)
+    {
+        heap_manager::free_page(mmclean_shadow);
+        return 0xF7;
+    }
+
+    // shadow_code_page flag — only the 14B JMP is modified, but MmClean is stable kernel code.
+    {
+        slat::hook::entry_t* entry = slat::hook::entry_t::find(target_pa >> 12);
+        if (entry) entry->set_shadow_code_page(1);
+    }
+
+    // 6. Fill context
+    ctx.active = true;
+    ctx.target_va = target_va;
+    ctx.target_pa_page = pa_page;
+    ctx.shadow_heap_va = mmclean_shadow;
+    ctx.trampoline_va = trampoline_va;
+    ctx.trampoline_hidden_slot = 0xFFFF;
+    ctx.stub_pfn_offset = 0;
+    ctx.displaced_count = displaced_count;
+
+    // Store pre-check host VA for re-arm patching
+    cr3_intercept::mmclean_hook::precheck_host_va = sc;
+
+    cr3_intercept::cleanup_hook::target_eprocess = target_eprocess;
+
+    serial::print("mmclean: precheck installed at "); serial::print_hex(precheck_va);
+    serial::print(" trampoline="); serial::print_hex(trampoline_va); serial::println("");
+
+    return 1;
+}
+
+// MmAccessFault hook setup — shadow code page version (no hidden memory dependency).
+// Inline 44-byte shellcode checks PML4 index of faulting VA:
+//   Match → swap CR3 to clone, return STATUS_SUCCESS (0)
+//   No match → JMP to trampoline (displaced prologue + JMP back)
+// Both handler and trampoline live in ntoskrnl shadow code pages (kernel VA, all processes).
+//
+// At boot: installed with clone_cr3=0 (dormant). Re-armed at attach with real values.
 std::uint64_t setup_mmaf_inline_hook_impl(
     std::uint64_t target_va, std::uint64_t clone_cr3,
     std::uint32_t displaced_count, std::uint8_t hidden_pml4_index)
@@ -1708,15 +2827,155 @@ std::uint64_t setup_mmaf_inline_hook_impl(
 
     if (cr3_intercept::mmaf_hook::ctx.active)
     {
-        // Hook already installed (permanent) — just update params
+        // Hook already installed — patch immediates in-place on shadow code page.
+        // handler_host_va points to the 44-byte shellcode in shadow_code allocation.
+        if (cr3_intercept::mmaf_hook::ctx.stub_pfn_offset != 0)
+        {
+            // stub_pfn_offset stores offset-from-shadow-page-start of the handler shellcode.
+            // We use it to find the handler host VA and patch clone_cr3 + pml4_index.
+            auto* handler = static_cast<std::uint8_t*>(cr3_intercept::mmaf_hook::ctx.shadow_heap_va);
+            if (handler)
+            {
+                // Patch pml4_index at offset +11 (cmp al, imm8 operand)
+                handler[11] = hidden_pml4_index;
+                // Patch clone_cr3 at offset +18 (movabs rax, imm64 operand)
+                *reinterpret_cast<std::uint64_t*>(handler + 18) = clone_cr3;
+            }
+        }
         return 1;
     }
 
-    const auto result = ept_install_hook(
-        target_va, reinterpret_cast<void*>(&hook_MmAccessFault),
-        displaced_count, &cr3_intercept::mmaf_hook::ctx);
+    serial::reinit();  // reclaim COM1 from VMX root (serial.sys may have reconfigured)
+    serial::println("mmaf: setup_mmaf_inline_hook_impl (shadow code version)");
 
-    return result;
+    // shadow_code must be initialized by deferred init in Hook 2
+    if (!shadow_code::initialized) return 0xE000;
+    if (shadow_code::region_count == 0) return 0xE001;
+
+    const cr3 slat_cr3 = slat::hyperv_cr3();
+    const cr3 orig_cr3 = get_guest_cr3_for_translation();
+
+    // 1. Translate target VA → PA, read original prologue
+    const std::uint64_t target_pa = memory_manager::translate_guest_virtual_address(
+        orig_cr3, slat_cr3, { .address = target_va });
+    if (!target_pa) return 0xE1;
+
+    const std::uint64_t page_off = target_pa & 0xFFF;
+    const std::uint64_t pa_page = target_pa & ~0xFFFull;
+
+    const auto* orig_page = static_cast<const std::uint8_t*>(
+        memory_manager::map_guest_physical(slat_cr3, pa_page));
+    if (!orig_page) return 0xE2;
+
+    if (displaced_count < 14) return 0xE3; // need at least 14B for abs JMP
+
+    // 2. Allocate trampoline in shadow code pages (displaced bytes + 14B JMP back)
+    const std::uint64_t trampoline_va = shadow_code::alloc_trampoline(
+        orig_page + page_off, displaced_count, target_va + displaced_count);
+    if (!trampoline_va) return 0xE400 | static_cast<std::uint8_t>(shadow_code::region_count);
+
+    // 3. Allocate 44-byte inline handler in shadow code pages
+    void* handler_host = nullptr;
+    const std::uint64_t handler_va = shadow_code::alloc(48, &handler_host);
+    if (!handler_va || !handler_host) return 0xE5;
+
+    // 4. Assemble 44-byte position-independent shellcode
+    // Entry: RCX=FaultStatus, RDX=VirtualAddress, R8=PreviousMode, R9=TrapInformation
+    auto* sc = static_cast<std::uint8_t*>(handler_host);
+    int pos = 0;
+
+    // push rax                            [50]
+    sc[pos++] = 0x50;
+    // mov rax, rdx                        [48 8B C2]
+    sc[pos++] = 0x48; sc[pos++] = 0x8B; sc[pos++] = 0xC2;
+    // shr rax, 39                         [48 C1 E8 27]
+    sc[pos++] = 0x48; sc[pos++] = 0xC1; sc[pos++] = 0xE8; sc[pos++] = 0x27;
+    // and al, 0xFF                        [24 FF]
+    sc[pos++] = 0x24; sc[pos++] = 0xFF;
+    // cmp al, HIDDEN_PML4_INDEX           [3C xx] — offset 12, patched
+    sc[pos++] = 0x3C;
+    const int pml4_idx_offset = pos;
+    sc[pos++] = hidden_pml4_index;
+    // pop rax                             [58]
+    sc[pos++] = 0x58;
+    // jne .passthrough                    [75 xx] — offset 14, rel8 patched below
+    sc[pos++] = 0x75;
+    const int jne_rel_offset = pos;
+    sc[pos++] = 0x00; // placeholder
+
+    // Match path: swap CR3 to clone, return STATUS_SUCCESS
+    // push rax                            [50]
+    sc[pos++] = 0x50;
+    // movabs rax, CLONE_CR3_VALUE         [48 B8 xx*8] — offset 17, patched
+    sc[pos++] = 0x48; sc[pos++] = 0xB8;
+    const int clone_cr3_offset = pos;
+    *reinterpret_cast<std::uint64_t*>(sc + pos) = clone_cr3;
+    pos += 8;
+    // mov cr3, rax                        [0F 22 D8]
+    sc[pos++] = 0x0F; sc[pos++] = 0x22; sc[pos++] = 0xD8;
+    // pop rax                             [58]
+    sc[pos++] = 0x58;
+    // xor eax, eax                        [33 C0]
+    sc[pos++] = 0x33; sc[pos++] = 0xC0;
+    // ret                                 [C3]
+    sc[pos++] = 0xC3;
+
+    // .passthrough: 14B absolute JMP to trampoline
+    sc[jne_rel_offset] = static_cast<std::uint8_t>(pos - (jne_rel_offset + 1));
+    // push low32                          [68 xx xx xx xx]
+    sc[pos++] = 0x68;
+    *reinterpret_cast<std::uint32_t*>(sc + pos) = static_cast<std::uint32_t>(trampoline_va);
+    pos += 4;
+    // mov [rsp+4], high32                 [C7 44 24 04 xx xx xx xx]
+    sc[pos++] = 0xC7; sc[pos++] = 0x44; sc[pos++] = 0x24; sc[pos++] = 0x04;
+    *reinterpret_cast<std::uint32_t*>(sc + pos) = static_cast<std::uint32_t>(trampoline_va >> 32);
+    pos += 4;
+    // ret                                 [C3]
+    sc[pos++] = 0xC3;
+
+    serial::print("mmaf: handler "); serial::print_dec(pos); serial::println("B assembled");
+
+    // 5. Create shadow page for MmAccessFault function itself
+    void* mmaf_shadow = heap_manager::allocate_page();
+    if (!mmaf_shadow) return 0xE6;
+    crt::copy_memory(mmaf_shadow, orig_page, 0x1000);
+
+    // Write 14B absolute JMP at prologue → handler_va
+    auto* prologue = static_cast<std::uint8_t*>(mmaf_shadow) + page_off;
+    prologue[0] = 0x68; // push low32
+    *reinterpret_cast<std::uint32_t*>(prologue + 1) = static_cast<std::uint32_t>(handler_va);
+    prologue[5] = 0xC7; // mov [rsp+4], high32
+    prologue[6] = 0x44;
+    prologue[7] = 0x24;
+    prologue[8] = 0x04;
+    *reinterpret_cast<std::uint32_t*>(prologue + 9) = static_cast<std::uint32_t>(handler_va >> 32);
+    prologue[13] = 0xC3; // ret
+
+    // 6. EPT-split: execute → mmaf shadow (--X), read/write → original
+    const std::uint64_t mmaf_shadow_pa = memory_manager::unmap_host_physical(mmaf_shadow);
+    unhide_physical_page(slat_cr3, mmaf_shadow_pa);
+
+    if (slat::hook::add({ .address = pa_page }, { .address = mmaf_shadow_pa }, 14) == 0)
+    {
+        heap_manager::free_page(mmaf_shadow);
+        return 0xE7;
+    }
+
+    // 7. Fill context
+    auto& ctx = cr3_intercept::mmaf_hook::ctx;
+    ctx.active = true;
+    ctx.target_va = target_va;
+    ctx.target_pa_page = pa_page;
+    ctx.shadow_heap_va = handler_host;  // points to handler shellcode for patching
+    ctx.trampoline_va = trampoline_va;
+    ctx.trampoline_hidden_slot = 0xFFFF; // not using hidden region
+    ctx.stub_pfn_offset = 1; // nonzero signals "patchable" (actual patching uses handler_host)
+    ctx.displaced_count = displaced_count;
+
+    serial::print("mmaf: hook installed, handler="); serial::print_hex(handler_va);
+    serial::print(" trampoline="); serial::print_hex(trampoline_va); serial::println("");
+
+    return 1;
 }
 
 // Read 4KB from original page tables into a clone-visible buffer
@@ -2170,6 +3429,11 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             // read mmaf_hit_count (MmAccessFault hook diagnostic)
             trap_frame->rax = cr3_intercept::mmaf_hit_count;
         }
+        else if (hypercall_info.call_reserved_data == 37)
+        {
+            // read mmaf_hook total call count (stub filter fires for ALL processes)
+            trap_frame->rax = cr3_intercept::mmaf_hook::total_count;
+        }
         else if (hypercall_info.call_reserved_data == 7)
         {
             // check_and_clear_syscall_hijack: atomically disarm and return shellcode_va
@@ -2240,6 +3504,56 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             cr3_intercept::syscall_hijack_shellcode_va = 0;
             cr3_intercept::syscall_hijack_rip_offset = 0;
             trap_frame->rax = 1;
+        }
+        else if (hypercall_info.call_reserved_data == 10)
+        {
+            // MmClean CPUID hook handler — process death detection (Option A).
+            // Triggered by CPUID stub on MmClean shadow page (mov ecx, 0x5533A3D8; cpuid).
+            // ALL processes calling MmClean on hook_cr3 hit this. Safe: CPUID → VMEXIT → here.
+            // Non-target: passthrough via trampoline. Target: set cleanup_pending + trampoline.
+            //
+            // CRITICAL: rip_redirected = true — handler redirects RIP to CC trampoline.
+            // Do NOT advance RIP normally (would land on dead NOPs after CPUID stub).
+
+            cr3_intercept::cleanup_hook::hook_entry_count++;
+
+            if (cr3_intercept::cleanup_hook::armed && cr3_intercept::enabled)
+            {
+                cr3_intercept::cleanup_hook::hook_hit_count++;
+
+                const cr3 guest_cr3 = arch::get_guest_cr3();
+                const std::uint64_t guest_pfn = guest_cr3.flags & cr3_intercept::cr3_pfn_mask;
+                const std::uint64_t target_pfn = cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask;
+                const std::uint64_t clone_pfn = cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask;
+
+                const bool is_target = (guest_pfn == target_pfn) ||
+                    (guest_pfn == clone_pfn) ||
+                    (cr3_intercept::target_user_cr3 != 0 &&
+                     guest_pfn == (cr3_intercept::target_user_cr3 & cr3_intercept::cr3_pfn_mask));
+
+                if (is_target)
+                {
+                    cr3_intercept::cleanup_hook::hook_match_count++;
+
+                    const char was_armed = _InterlockedExchange8(
+                        reinterpret_cast<volatile char*>(&cr3_intercept::cleanup_hook::armed), 0);
+                    if (was_armed)
+                    {
+                        cr3_intercept::cleanup_hook::cleanup_pending = 1;
+                    }
+                }
+            }
+
+            // Redirect RIP to CC trampoline (displaced bytes + JMP back to MmClean+displaced_count).
+            // Works for ALL processes: displaced bytes restore prologue, JMP back continues original MmClean.
+            if (cr3_intercept::mmclean_hook::ctx.active &&
+                cr3_intercept::mmclean_hook::ctx.trampoline_va != 0)
+            {
+                arch::set_guest_rip(cr3_intercept::mmclean_hook::ctx.trampoline_va);
+                rip_redirected = true;
+            }
+
+            trap_frame->rax = cr3_intercept::cleanup_hook::cleanup_pending;
         }
         else if (hypercall_info.call_reserved_data == 12)
         {
@@ -2382,8 +3696,9 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
         }
         else if (hypercall_info.call_reserved_data == 29)
         {
-            // setup_mmclean_inline_hook: RDX=target_va, R8=target_eprocess, R9=displaced_count
-            trap_frame->rax = setup_mmclean_inline_hook_impl(
+            // setup_mmclean_precheck_hook: RDX=target_va, R8=target_eprocess, R9=displaced_count
+            // Pre-check version: 67B inline shellcode (zero VMEXIT), replaces CPUID stub.
+            trap_frame->rax = setup_mmclean_precheck_hook_impl(
                 trap_frame->rdx, trap_frame->r8,
                 static_cast<std::uint32_t>(trap_frame->r9));
         }
@@ -2399,6 +3714,131 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
                 cr3_intercept::cleanup_hook::armed = 0;
                 cr3_intercept::cleanup_hook::target_eprocess = 0;
                 trap_frame->rax = 1;
+            }
+        }
+        else if (hypercall_info.call_reserved_data == 32)
+        {
+            // Hook 3 (VMWRITE EPTP redirect) control + diagnostics
+            // RDX: 1=activate, 0=deactivate, 2=read hook_cr3 count, 3=read hyperv_cr3 count, 4=read rebootstrap count
+            const auto sub_cmd = trap_frame->rdx;
+            if (sub_cmd == 1)
+            {
+                slat::activate_vmwrite_hook(true);
+                trap_frame->rax = 1;
+            }
+            else if (sub_cmd == 0)
+            {
+                slat::activate_vmwrite_hook(false);
+                trap_frame->rax = 1;
+            }
+            else if (sub_cmd == 2)
+            {
+                trap_frame->rax = static_cast<std::uint64_t>(hook3_on_hook_cr3_count);
+            }
+            else if (sub_cmd == 3)
+            {
+                trap_frame->rax = static_cast<std::uint64_t>(hook3_on_hyperv_cr3_count);
+            }
+            else if (sub_cmd == 4)
+            {
+                trap_frame->rax = static_cast<std::uint64_t>(hook3_rebootstrap_count);
+            }
+            else if (sub_cmd == 5)
+            {
+                trap_frame->rax = slat::read_vmwrite_hook_counter();
+            }
+            else if (sub_cmd == 6)
+            {
+                trap_frame->rax = slat::read_vmwrite_hook_slot1();
+            }
+            else if (sub_cmd == 7)
+            {
+                trap_frame->rax = slat::read_vmwrite_hook_slot2();
+            }
+            else if (sub_cmd == 9)
+            {
+                trap_frame->rax = slat::read_vmwrite_hook_cave_pa();
+            }
+            // Option B diagnostics (EPTP source table patch)
+            else if (sub_cmd == 10) { trap_frame->rax = slat::optb_diag_bail; }
+            else if (sub_cmd == 11) { trap_frame->rax = slat::optb_diag_per_vp; }
+            else if (sub_cmd == 12) { trap_frame->rax = slat::optb_diag_ept_data; }
+            else if (sub_cmd == 13) { trap_frame->rax = slat::optb_diag_count; }
+            // Deep GS diagnostics
+            else if (sub_cmd == 14) { trap_frame->rax = slat::optb_diag_gs_base; }
+            else if (sub_cmd == 15) { trap_frame->rax = slat::optb_diag_manual_read; }
+            else if (sub_cmd == 16) { trap_frame->rax = slat::optb_diag_gs_first_qword; }
+            else if (sub_cmd == 17) { trap_frame->rax = slat::optb_diag_host_gs_base; }
+            else if (sub_cmd == 8)
+            {
+                // Cave diagnostic: dump shellcode bytes + reverse-engineer function entry
+                const std::uint64_t cave_pa = slat::read_vmwrite_hook_cave_pa();
+                if (cave_pa == 0)
+                {
+                    trap_frame->rax = 0;
+                }
+                else
+                {
+                    const auto* cave = static_cast<const std::uint8_t*>(
+                        memory_manager::map_host_physical(cave_pa));
+
+                    serial::reinit();  // reclaim COM1 from VMX root (serial.sys may have reconfigured)
+
+                    // 1. Dump SLOT1/SLOT2 from actual cave bytes
+                    std::uint64_t slot1_in_cave = *reinterpret_cast<const std::uint64_t*>(cave + 4);
+                    std::uint64_t slot2_in_cave = *reinterpret_cast<const std::uint64_t*>(cave + 39);
+                    serial::print("[cavediag] SLOT1 (cave+4)="); serial::print_hex(slot1_in_cave); serial::println("");
+                    serial::print("[cavediag] SLOT2 (cave+39)="); serial::print_hex(slot2_in_cave); serial::println("");
+
+                    // 2. Dump first 73 bytes of shellcode
+                    serial::print("[cavediag] shellcode: ");
+                    for (int i = 0; i < 73; i++)
+                    {
+                        serial::print_byte_hex(cave[i]);
+                        if (i == 11 || i == 16 || i == 28 || i == 36 || i == 46 || i == 52 || i == 54 || i == 61 || i == 67)
+                            serial::print(" | ");
+                        else
+                            serial::print(" ");
+                    }
+                    serial::println("");
+
+                    // 3. Reverse-engineer function entry from displaced jmp lazy_path
+                    // The JMP rel32 at the function entry: func+5+rel32 = cave_va
+                    // We can get cave_va from the displaced instructions' RIP-relative fixups.
+                    // Displaced test at cave+55: test byte [rip+rel32], 1
+                    // The rel32 at cave+57 was computed as: flag_target_va - (cave_va + 62)
+                    // So cave_va = flag_target_va - rel32 - 62... but we don't know flag_target_va.
+                    //
+                    // Simpler: scan backward from cave for E9 XX XX XX XX where target = cave.
+                    // The function entry has: E9 rel32 90 90 (7 bytes)
+                    // rel32 = cave_va - (func_va + 5)
+                    // So func_va = cave_va - rel32 - 5... but we need cave_va (host VA).
+                    //
+                    // Alternative: just dump the cave page to find the JMP pointing here.
+                    // But let's use the approach: scan the page(s) before the cave for E9.
+                    // Actually, the simplest: the cave is in hvix64 .text. The function could be
+                    // anywhere. Let's just dump 7 bytes at a few candidate offsets.
+
+                    // Report SLOT status
+                    const bool slot1_ok = slot1_in_cave != 0;
+                    const bool slot2_ok = slot2_in_cave != 0;
+                    serial::print("[cavediag] SLOT1 "); serial::println(slot1_ok ? "SET" : "ZERO (inactive!)");
+                    serial::print("[cavediag] SLOT2 "); serial::println(slot2_ok ? "SET" : "ZERO (no target!)");
+
+                    // 4. Check first 2 bytes: should be 0x50 (push rax), 0x52 (push rdx)
+                    const bool header_ok = (cave[0] == 0x50 && cave[1] == 0x52);
+                    serial::print("[cavediag] header (50 52): ");
+                    serial::print_byte_hex(cave[0]); serial::print(" ");
+                    serial::print_byte_hex(cave[1]);
+                    serial::println(header_ok ? " OK" : " MISMATCH!");
+
+                    // Return combined status
+                    trap_frame->rax = (header_ok ? 1 : 0) | (slot1_ok ? 2 : 0) | (slot2_ok ? 4 : 0);
+                }
+            }
+            else
+            {
+                trap_frame->rax = 0;
             }
         }
         else if (hypercall_info.call_reserved_data == 33)
@@ -2941,6 +4381,229 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
                 break;
             }
         }
+        else if (hypercall_info.call_reserved_data == 50)
+        {
+            // hookdiag: EPT hook diagnostic system.
+            // RDX = field_index:
+            //   0: hook_count | (shadow_code_initialized << 8) | (mmclean_active << 9) | (armed << 10)
+            //   Per hook (base = 1 + hook_index * 8):
+            //     +0: original_pfn
+            //     +1: shadow_pfn (from hook_cr3 PTE) | (pte_read << 36) | (pte_write << 37) | (pte_exec << 38)
+            //     +2: hook_byte_offset | (hook_byte_length << 12) | (shadow_code_page << 20) | (hook_byte_offset2 << 21) | (hook_byte_length2 << 33)
+            //     +3: first 8 bytes of SHADOW page at hook_byte_offset
+            //     +4: next 8 bytes of shadow (offset+8)
+            //     +5: first 8 bytes of ORIGINAL page at hook_byte_offset
+            //     +6: next 8 bytes of original (offset+8)
+            //     +7: validation flags (bit 0=PTE is --X, bit 1=shadow!=original PFN, bit 2=shadow bytes differ from original)
+            // Also dumps everything to serial when field=0 (full diagnostic pass).
+            const std::uint64_t field = trap_frame->rdx;
+
+            // Count hooks
+            std::uint64_t hook_count = 0;
+            slat::hook::entry_t* entries[32] = {};
+            {
+                auto* cur = slat::hook::used_hook_list_head;
+                while (cur && hook_count < 32)
+                {
+                    entries[hook_count++] = cur;
+                    cur = cur->next();
+                }
+            }
+
+            if (field == 0)
+            {
+                // Field 0: summary + full serial dump
+                serial::reinit();  // reclaim COM1 from VMX root (serial.sys may have reconfigured)
+                serial::println("=== HOOKDIAG ===");
+                serial::print("hook_count="); serial::print_dec(hook_count);
+                serial::print(" shadow_code="); serial::print_dec(shadow_code::initialized ? 1 : 0);
+                serial::print(" mmclean="); serial::print_dec(cr3_intercept::mmclean_hook::ctx.active ? 1 : 0);
+                serial::print(" armed="); serial::print_dec(cr3_intercept::cleanup_hook::armed);
+                serial::println("");
+
+                for (std::uint64_t i = 0; i < hook_count; i++)
+                {
+                    const auto* e = entries[i];
+                    const std::uint64_t orig_pfn = e->original_pfn();
+                    const std::uint64_t off = e->hook_byte_offset();
+                    const std::uint64_t len = e->hook_byte_length();
+
+                    serial::print("--- Hook #"); serial::print_dec(i); serial::println(" ---");
+                    serial::print("  original_pfn="); serial::print_hex(orig_pfn);
+                    serial::print("  shadow_code_page="); serial::print_dec(e->shadow_code_page());
+                    serial::print("  offset="); serial::print_hex(off);
+                    serial::print("  length="); serial::print_dec(len); serial::println("");
+
+                    // Read PTE from hook_cr3
+                    const virtual_address_t gpa = { .address = orig_pfn << 12 };
+                    slat_pte* pte = slat::get_pte(slat::hook_cr3(), gpa);
+                    std::uint64_t shadow_pfn = 0;
+                    std::uint8_t pte_r = 0, pte_w = 0, pte_x = 0;
+                    if (pte)
+                    {
+                        shadow_pfn = pte->page_frame_number;
+                        pte_r = pte->read_access;
+                        pte_w = pte->write_access;
+                        pte_x = pte->execute_access;
+                    }
+                    serial::print("  shadow_pfn="); serial::print_hex(shadow_pfn);
+                    serial::print("  PTE: R="); serial::print_dec(pte_r);
+                    serial::print(" W="); serial::print_dec(pte_w);
+                    serial::print(" X="); serial::print_dec(pte_x);
+                    const bool pte_ok = (pte_r == 0 && pte_w == 0 && pte_x == 1);
+                    serial::print(pte_ok ? " [OK --X]" : " [FAIL expected --X]");
+                    serial::println("");
+
+                    // Map shadow and original pages, dump bytes at hook offset
+                    const auto* shadow_page = static_cast<const std::uint8_t*>(
+                        memory_manager::map_host_physical(shadow_pfn << 12));
+                    const auto* original_page = static_cast<const std::uint8_t*>(
+                        memory_manager::map_host_physical(orig_pfn << 12));
+
+                    if (shadow_page && original_page && off < 0x1000)
+                    {
+                        const std::uint64_t dump_len = (off + 16 <= 0x1000) ? 16 : (0x1000 - off);
+                        serial::print("  SHADOW : ");
+                        for (std::uint64_t b = 0; b < dump_len; b++)
+                        {
+                            serial::print_byte_hex(shadow_page[off + b]);
+                            serial::print(" ");
+                        }
+                        serial::println("");
+                        serial::print("  ORIGINAL: ");
+                        for (std::uint64_t b = 0; b < dump_len; b++)
+                        {
+                            serial::print_byte_hex(original_page[off + b]);
+                            serial::print(" ");
+                        }
+                        serial::println("");
+
+                        // Check if shadow differs from original at hook offset (should differ = our hook)
+                        bool bytes_differ = false;
+                        for (std::uint64_t b = 0; b < dump_len && !bytes_differ; b++)
+                        {
+                            if (shadow_page[off + b] != original_page[off + b])
+                                bytes_differ = true;
+                        }
+                        serial::print("  bytes_differ="); serial::print_dec(bytes_differ ? 1 : 0);
+                        serial::print(bytes_differ ? " [OK hook present]" : " [FAIL shadow == original, no hook?]");
+                        serial::println("");
+                    }
+                }
+                serial::println("=== END HOOKDIAG ===");
+
+                trap_frame->rax = hook_count
+                    | (static_cast<std::uint64_t>(shadow_code::initialized ? 1 : 0) << 8)
+                    | (static_cast<std::uint64_t>(cr3_intercept::mmclean_hook::ctx.active ? 1 : 0) << 9)
+                    | (static_cast<std::uint64_t>(cr3_intercept::cleanup_hook::armed) << 10);
+            }
+            else
+            {
+                // Per-hook field query
+                const std::uint64_t hook_idx = (field - 1) / 8;
+                const std::uint64_t sub_field = (field - 1) % 8;
+
+                if (hook_idx >= hook_count)
+                {
+                    trap_frame->rax = 0;
+                }
+                else
+                {
+                    const auto* e = entries[hook_idx];
+                    const std::uint64_t orig_pfn = e->original_pfn();
+                    const std::uint64_t off = e->hook_byte_offset();
+
+                    switch (sub_field)
+                    {
+                    case 0: // original_pfn
+                        trap_frame->rax = orig_pfn;
+                        break;
+                    case 1: // shadow_pfn + PTE flags
+                    {
+                        const virtual_address_t gpa = { .address = orig_pfn << 12 };
+                        slat_pte* pte = slat::get_pte(slat::hook_cr3(), gpa);
+                        if (pte)
+                            trap_frame->rax = pte->page_frame_number
+                                | (static_cast<std::uint64_t>(pte->read_access) << 36)
+                                | (static_cast<std::uint64_t>(pte->write_access) << 37)
+                                | (static_cast<std::uint64_t>(pte->execute_access) << 38);
+                        else
+                            trap_frame->rax = 0;
+                        break;
+                    }
+                    case 2: // hook metadata
+                        trap_frame->rax = off
+                            | (e->hook_byte_length() << 12)
+                            | (e->shadow_code_page() << 20)
+                            | (e->hook_byte_offset2() << 21)
+                            | (e->hook_byte_length2() << 33);
+                        break;
+                    case 3: case 4: case 5: case 6:
+                    {
+                        // 3,4 = shadow bytes; 5,6 = original bytes
+                        const bool is_shadow = (sub_field <= 4);
+                        const std::uint64_t byte_off = off + ((sub_field == 4 || sub_field == 6) ? 8 : 0);
+                        const std::uint64_t pfn = is_shadow ? 0 : orig_pfn;
+                        const std::uint8_t* page = nullptr;
+                        if (is_shadow)
+                        {
+                            const virtual_address_t gpa = { .address = orig_pfn << 12 };
+                            slat_pte* pte = slat::get_pte(slat::hook_cr3(), gpa);
+                            if (pte)
+                                page = static_cast<const std::uint8_t*>(
+                                    memory_manager::map_host_physical(pte->page_frame_number << 12));
+                        }
+                        else
+                        {
+                            page = static_cast<const std::uint8_t*>(
+                                memory_manager::map_host_physical(orig_pfn << 12));
+                        }
+                        if (page && byte_off + 8 <= 0x1000)
+                        {
+                            std::uint64_t val = 0;
+                            crt::copy_memory(&val, page + byte_off, 8);
+                            trap_frame->rax = val;
+                        }
+                        else trap_frame->rax = 0;
+                        break;
+                    }
+                    case 7: // validation flags
+                    {
+                        std::uint64_t flags = 0;
+                        const virtual_address_t gpa = { .address = orig_pfn << 12 };
+                        slat_pte* pte = slat::get_pte(slat::hook_cr3(), gpa);
+                        if (pte)
+                        {
+                            if (pte->read_access == 0 && pte->write_access == 0 && pte->execute_access == 1)
+                                flags |= 1; // PTE is --X
+                            if (pte->page_frame_number != orig_pfn)
+                                flags |= 2; // shadow != original PFN
+                        }
+                        // Check bytes differ
+                        if (pte)
+                        {
+                            const auto* sp = static_cast<const std::uint8_t*>(
+                                memory_manager::map_host_physical(pte->page_frame_number << 12));
+                            const auto* op = static_cast<const std::uint8_t*>(
+                                memory_manager::map_host_physical(orig_pfn << 12));
+                            if (sp && op && off < 0x1000)
+                            {
+                                for (std::uint64_t b = 0; b < 16 && off + b < 0x1000; b++)
+                                {
+                                    if (sp[off + b] != op[off + b]) { flags |= 4; break; }
+                                }
+                            }
+                        }
+                        trap_frame->rax = flags;
+                        break;
+                    }
+                    default:
+                        trap_frame->rax = 0;
+                        break;
+                    }
+                }
+            }
+        }
         else
         {
             const cr3 guest_cr3 = arch::get_guest_cr3();
@@ -3062,7 +4725,8 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
                         const std::uint64_t pt_pa = pd[0].page_frame_number << 12;
 
                         auto unhide_in_hook = [&](std::uint64_t pa) {
-                            slat_pte* pte = slat::get_pte(hook, { .address = pa }, 1);
+                            std::uint8_t ss = 0;
+                            slat_pte* pte = slat::fork_get_pte(hook, slat::hyperv_cr3(), { .address = pa }, 1, &ss);
                             if (pte)
                             {
                                 pte->page_frame_number = pa >> 12;
@@ -3122,7 +4786,8 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             {
                 if (hook.flags != 0)
                 {
-                    slat_pte* const pte_hook = slat::get_pte(hook, { .address = pa }, 1);
+                    std::uint8_t ss = 0;
+                    slat_pte* const pte_hook = slat::fork_get_pte(hook, slat::hyperv_cr3(), { .address = pa }, 1, &ss);
                     if (pte_hook != nullptr)
                     {
                         pte_hook->page_frame_number = pa >> 12;
@@ -3204,7 +4869,8 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             // Only unhide in hook_cr3.
             if (hook.flags != 0)
             {
-                slat_pte* const pte_hook = slat::get_pte(hook, { .address = data_pa }, 1);
+                std::uint8_t ss_4547 = 0;
+                slat_pte* const pte_hook = slat::fork_get_pte(hook, slat::hyperv_cr3(), { .address = data_pa }, 1, &ss_4547);
                 if (pte_hook != nullptr)
                 {
                     pte_hook->page_frame_number = data_pa >> 12;
@@ -3262,6 +4928,22 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
             trap_frame->rax = unshadow_guest_page_impl(slat_cr3, trap_frame->rdx);
             break;
         }
+        else if (hypercall_info.call_reserved_data == 38)
+        {
+            // WriteCloneVirtualMemory: external stealth write into clone CR3
+            // RDX = dest_va (in target), R8 = source_va (in caller), R9 = size
+            // Returns: bytes written
+            trap_frame->rax = WriteCloneVirtualMemory_impl(trap_frame);
+            break;
+        }
+        else if (hypercall_info.call_reserved_data == 39)
+        {
+            // ReadCloneVirtualMemory: read what the target sees via clone CR3
+            // RDX = source_va (in target), R8 = dest_va (in caller), R9 = size
+            // Returns: bytes read
+            trap_frame->rax = ReadCloneVirtualMemory_impl(trap_frame);
+            break;
+        }
 
         // call_reserved_data == 0: existing clone behavior
         const cr3 target_cr3 = { .flags = trap_frame->rdx };
@@ -3300,7 +4982,8 @@ bool hypercall::process(const hypercall_info_t hypercall_info, trap_frame_t* con
 
         if (hook.flags != 0)
         {
-            slat_pte* const pte_hook = slat::get_pte(hook, { .address = new_pml4_hpa }, 1);
+            std::uint8_t ss_4659 = 0;
+            slat_pte* const pte_hook = slat::fork_get_pte(hook, slat::hyperv_cr3(), { .address = new_pml4_hpa }, 1, &ss_4659);
 
             if (pte_hook != nullptr)
             {

@@ -5,7 +5,10 @@
       "features": ["dx11-binding", "win32-binding"]
     },
     "nlohmann-json",
-    "cpp-httplib",
+    {
+      "name": "cpp-httplib",
+      "features": ["openssl"]
+    },
     "zydis"
   ]
 }

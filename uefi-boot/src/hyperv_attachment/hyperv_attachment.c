@@ -217,11 +217,11 @@ EFI_STATUS hyperv_attachment_get_relocated_entry_point(UINT8** hyperv_attachment
     return hyperv_attachment_get_entry_point(hyperv_attachment_entry_point, hyperv_attachment_virtual_base);
 }
 
-typedef void(*hyperv_attachment_entry_point_t)(UINT8** detours_out, CHAR8* original_vmexit_handler, UINT64 heap_physical_base, UINT64 heap_physical_usable_base, UINT64 heap_total_size, UINT64 uefi_boot_physical_base_address, UINT32 uefi_boot_image_size, CHAR8* get_vmcb_gadget, UINT64 vmexit_entry_trampoline);
+typedef void(*hyperv_attachment_entry_point_t)(UINT8** detours_out, CHAR8* original_vmexit_handler, UINT64 heap_physical_base, UINT64 heap_physical_usable_base, UINT64 heap_total_size, UINT64 uefi_boot_physical_base_address, UINT32 uefi_boot_image_size, CHAR8* get_vmcb_gadget, UINT64 vmexit_entry_trampoline, UINT64 vmwrite_hook_cave_pa, UINT64 enlightened_vmcs_offsets);
 
-void hyperv_attachment_invoke_entry_point(UINT8** detours_out, UINT8* hyperv_attachment_entry_point, CHAR8* original_vmexit_handler, UINT64 heap_physical_base, UINT64 heap_physical_usable_base, UINT64 heap_total_size, UINT64 uefi_boot_physical_base_address, UINT32 uefi_boot_image_size, CHAR8* get_vmcb_gadget, UINT64 vmexit_entry_trampoline)
+void hyperv_attachment_invoke_entry_point(UINT8** detours_out, UINT8* hyperv_attachment_entry_point, CHAR8* original_vmexit_handler, UINT64 heap_physical_base, UINT64 heap_physical_usable_base, UINT64 heap_total_size, UINT64 uefi_boot_physical_base_address, UINT32 uefi_boot_image_size, CHAR8* get_vmcb_gadget, UINT64 vmexit_entry_trampoline, UINT64 vmwrite_hook_cave_pa, UINT64 enlightened_vmcs_offsets)
 {
-    ((hyperv_attachment_entry_point_t)hyperv_attachment_entry_point)(detours_out, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget, vmexit_entry_trampoline);
+    ((hyperv_attachment_entry_point_t)hyperv_attachment_entry_point)(detours_out, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget, vmexit_entry_trampoline, vmwrite_hook_cave_pa, enlightened_vmcs_offsets);
 }
 
 EFI_STATUS hyperv_attachment_load_and_delete_from_disk(UINT8** file_buffer_out)

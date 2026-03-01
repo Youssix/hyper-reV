@@ -111,6 +111,16 @@ void slat::hook::entry_t::set_hook_byte_length2(const std::uint64_t length)
 	hook_byte_length2_ = length;
 }
 
+std::uint64_t slat::hook::entry_t::shadow_code_page() const
+{
+	return shadow_code_page_;
+}
+
+void slat::hook::entry_t::set_shadow_code_page(const std::uint64_t val)
+{
+	shadow_code_page_ = val;
+}
+
 slat::hook::entry_t* slat::hook::entry_t::find(const std::uint64_t target_original_4kb_pfn, entry_t** const previous_entry_out)
 {
 	entry_t* current_entry = used_hook_list_head;

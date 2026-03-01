@@ -8,6 +8,7 @@
 #include "interrupts/interrupts.h"
 #include "cr3_intercept.h"
 #include "memory_manager/memory_manager.h"
+#include "logs/serial.h"
 #include <structures/trap_frame.h>
 #include <ia32-doc/ia32.hpp>
 #include <cstdint>
@@ -17,6 +18,7 @@ void process_first_vmexit();
 
 // Set by process_first_vmexit() in Hook 2 after all subsystems are initialized
 extern "C" volatile std::uint8_t hook2_initialized;
+
 
 extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame)
 {
@@ -49,6 +51,7 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
     // For fall-through exits (return 0): MUST restore hyperv_cr3 — HV expects its own EPTP.
     const cr3 hook_eptp = slat::hook_cr3();
     const bool need_eptp_management = hook_eptp.flags != 0 && slat::is_hook_cr3_ready();
+    const bool hook3_active = slat::is_vmwrite_hook_active();
     bool on_hook_cr3_now = false;
 
     if (need_eptp_management)
@@ -69,20 +72,39 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
             cr3 bootstrap = entry_eptp;
             bootstrap.address_of_page_directory = hook_eptp.address_of_page_directory;
             arch::set_slat_cr3(bootstrap);
-            slat::flush_current_logical_processor_cache(1);
+            // Lazy INVEPT: only flush if hook_cr3 EPT was modified since last INVEPT on this LP
+            {
+                const auto vpid = arch::get_current_vpid();
+                if (vpid < slat::max_logical_processors && slat::hook_cr3_ept_dirty[vpid])
+                {
+                    slat::flush_current_logical_processor_cache(1);
+                    slat::hook_cr3_ept_dirty[vpid] = 0;
+                }
+            }
+            // slat::flush_current_logical_processor_cache(1);
             on_hook_cr3_now = true;
         }
         else if (is_target && entry_eptp.address_of_page_directory == hook_eptp.address_of_page_directory)
         {
             on_hook_cr3_now = true;
         }
-        else if (!is_target && entry_eptp.address_of_page_directory == hook_eptp.address_of_page_directory)
+        else if (!is_target && /* !hook3_active && */ entry_eptp.address_of_page_directory == hook_eptp.address_of_page_directory)
         {
             // Non-target process on hook_cr3 → swap back to hyperv_cr3 (prevent #PF on hidden region)
+            // TODO: re-enable !hook3_active guard once Option B source table patch works
             cr3 restore = entry_eptp;
             restore.address_of_page_directory = slat::hyperv_cr3().address_of_page_directory;
             arch::set_slat_cr3(restore);
-            slat::flush_current_logical_processor_cache(1);
+            // Lazy INVEPT: only flush if hook_cr3 EPT was modified since last INVEPT on this LP
+            {
+                const auto vpid = arch::get_current_vpid();
+                if (vpid < slat::max_logical_processors && slat::hook_cr3_ept_dirty[vpid])
+                {
+                    slat::flush_current_logical_processor_cache(1);
+                    slat::hook_cr3_ept_dirty[vpid] = 0;
+                }
+            }
+            // slat::flush_current_logical_processor_cache(1);
         }
         // else: non-target on hyperv_cr3 → already correct, do nothing
     }
@@ -116,12 +138,21 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
         }
 
         // Not our MTF — fall through to Hyper-V (restore hyperv_cr3 first)
-        if (on_hook_cr3_now)
+        // TODO: re-enable !hook3_active guard once Option B source table patch works
+        if (on_hook_cr3_now /* && !hook3_active */)
         {
             cr3 restore = arch::get_slat_cr3();
             restore.address_of_page_directory = slat::hyperv_cr3().address_of_page_directory;
             arch::set_slat_cr3(restore);
-            slat::flush_current_logical_processor_cache(1);
+            // Lazy INVEPT: only flush if hook_cr3 EPT was modified since last INVEPT on this LP
+            {
+                const auto vpid = arch::get_current_vpid();
+                if (vpid < slat::max_logical_processors && slat::hook_cr3_ept_dirty[vpid])
+                {
+                    slat::flush_current_logical_processor_cache(1);
+                    slat::hook_cr3_ept_dirty[vpid] = 0;
+                }
+            }
         }
         return 0;
     }
@@ -268,14 +299,23 @@ extern "C" std::uint8_t vmexit_entry_fast_handler(trap_frame_t* const trap_frame
     }
 
     // Not handled — fall through to Hyper-V via trampoline.
-    // Restore hyperv_cr3 before falling through: HV must see its own EPTP,
-    // not our hook_cr3 which has forked/split pages HV doesn't know about.
-    if (on_hook_cr3_now)
+    // Restore hyperv_cr3 before falling through: HV must see its own EPTP.
+    // TODO: re-enable !hook3_active guard once Option B source table patch works
+    // (then HV's internal structures agree with hook_cr3 and no restore needed).
+    if (on_hook_cr3_now /* && !hook3_active */)
     {
         cr3 restore = arch::get_slat_cr3();
         restore.address_of_page_directory = slat::hyperv_cr3().address_of_page_directory;
         arch::set_slat_cr3(restore);
-        slat::flush_current_logical_processor_cache(1);
+        // Lazy INVEPT: only flush if hook_cr3 EPT was modified since last INVEPT on this LP
+        {
+            const auto vpid = arch::get_current_vpid();
+            if (vpid < slat::max_logical_processors && slat::hook_cr3_ept_dirty[vpid])
+            {
+                slat::flush_current_logical_processor_cache(1);
+                slat::hook_cr3_ept_dirty[vpid] = 0;
+            }
+        }
     }
     return 0;
 }

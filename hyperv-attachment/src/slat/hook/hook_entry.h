@@ -16,7 +16,8 @@ namespace slat::hook
 		std::uint64_t hook_byte_offset_ : 12;
 		std::uint64_t hook_byte_length_ : 8;
 		std::uint64_t hook_byte_offset2_ : 12;
-		std::uint64_t hook_byte_length2_ : 7;
+		std::uint64_t hook_byte_length2_ : 6;
+		std::uint64_t shadow_code_page_ : 1;
 
 	public:
 		[[nodiscard]] entry_t* next() const;
@@ -35,6 +36,7 @@ namespace slat::hook
 		[[nodiscard]] std::uint64_t hook_byte_length() const;
 		[[nodiscard]] std::uint64_t hook_byte_offset2() const;
 		[[nodiscard]] std::uint64_t hook_byte_length2() const;
+		[[nodiscard]] std::uint64_t shadow_code_page() const;
 
 		void set_original_read_access(std::uint64_t original_read_access);
 		void set_original_write_access(std::uint64_t original_write_access);
@@ -46,6 +48,7 @@ namespace slat::hook
 		void set_hook_byte_length(std::uint64_t length);
 		void set_hook_byte_offset2(std::uint64_t offset);
 		void set_hook_byte_length2(std::uint64_t length);
+		void set_shadow_code_page(std::uint64_t val);
 
 		static entry_t* find(std::uint64_t target_original_4kb_pfn, entry_t** previous_entry_out = nullptr);
 		static entry_t* find_in_2mb_range(std::uint64_t target_original_4kb_pfn, const entry_t* excluding_hook = nullptr);

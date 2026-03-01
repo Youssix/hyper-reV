@@ -1,4 +1,6 @@
 #include "anti_debug.h"
+#include "../auth/auth_client.h"
+#include "../vendor/skCrypter.h"
 #include <Windows.h>
 #include <winternl.h>
 #include <intrin.h>
@@ -6,6 +8,8 @@
 #include <atomic>
 
 #pragma comment(lib, "ntdll.lib")
+
+#define SK(s) ((const char*)skCrypt(s))
 
 // ntdll function types
 typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
@@ -32,8 +36,6 @@ namespace anti_debug
 
 	static bool check_nt_global_flag()
 	{
-		// PEB->NtGlobalFlag: debugger sets FLG_HEAP_ENABLE_TAIL_CHECK |
-		// FLG_HEAP_ENABLE_FREE_CHECK | FLG_HEAP_VALIDATE_PARAMETERS (0x70)
 #ifdef _WIN64
 		auto peb = (PPEB)__readgsqword(0x60);
 		DWORD flags = *(DWORD*)((BYTE*)peb + 0xBC);
@@ -47,13 +49,13 @@ namespace anti_debug
 	static bool check_debug_port()
 	{
 		auto NtQueryInformationProcess = (pNtQueryInformationProcess)
-			GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+			GetProcAddress(GetModuleHandleA(SK("ntdll.dll")), SK("NtQueryInformationProcess"));
 		if (!NtQueryInformationProcess) return false;
 
 		DWORD_PTR debug_port = 0;
 		NTSTATUS status = NtQueryInformationProcess(
 			GetCurrentProcess(),
-			(PROCESSINFOCLASS)7, // ProcessDebugPort
+			(PROCESSINFOCLASS)7,
 			&debug_port,
 			sizeof(debug_port),
 			nullptr);
@@ -64,18 +66,17 @@ namespace anti_debug
 	static bool check_debug_object_handle()
 	{
 		auto NtQueryInformationProcess = (pNtQueryInformationProcess)
-			GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+			GetProcAddress(GetModuleHandleA(SK("ntdll.dll")), SK("NtQueryInformationProcess"));
 		if (!NtQueryInformationProcess) return false;
 
 		HANDLE debug_obj = nullptr;
 		NTSTATUS status = NtQueryInformationProcess(
 			GetCurrentProcess(),
-			(PROCESSINFOCLASS)30, // ProcessDebugObjectHandle
+			(PROCESSINFOCLASS)30,
 			&debug_obj,
 			sizeof(debug_obj),
 			nullptr);
 
-		// if STATUS_SUCCESS, debugger is attached; STATUS_PORT_NOT_SET means no debugger
 		return NT_SUCCESS(status);
 	}
 
@@ -91,35 +92,31 @@ namespace anti_debug
 
 	static bool check_timing()
 	{
-		// rdtsc timing check: debugger stepping causes large deltas
 		unsigned __int64 t1 = __rdtsc();
 
-		// do a small amount of work
 		volatile int dummy = 0;
 		for (int i = 0; i < 100; i++)
 			dummy += i;
 
 		unsigned __int64 t2 = __rdtsc();
 
-		// threshold: a normal loop takes <10k cycles, debugger stepping takes 100k+
 		return (t2 - t1) > 100000;
 	}
 
 	static bool check_process_debug_flags()
 	{
 		auto NtQueryInformationProcess = (pNtQueryInformationProcess)
-			GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+			GetProcAddress(GetModuleHandleA(SK("ntdll.dll")), SK("NtQueryInformationProcess"));
 		if (!NtQueryInformationProcess) return false;
 
 		DWORD no_debug_inherit = 0;
 		NTSTATUS status = NtQueryInformationProcess(
 			GetCurrentProcess(),
-			(PROCESSINFOCLASS)31, // ProcessDebugFlags
+			(PROCESSINFOCLASS)31,
 			&no_debug_inherit,
 			sizeof(no_debug_inherit),
 			nullptr);
 
-		// if NoDebugInherit == 0, debugger is present
 		return NT_SUCCESS(status) && no_debug_inherit == 0;
 	}
 
@@ -141,17 +138,16 @@ namespace anti_debug
 	void hide_thread()
 	{
 		auto NtSetInformationThread = (pNtSetInformationThread)
-			GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtSetInformationThread");
+			GetProcAddress(GetModuleHandleA(SK("ntdll.dll")), SK("NtSetInformationThread"));
 		if (!NtSetInformationThread) return;
 
-		// ThreadHideFromDebugger = 0x11
 		NtSetInformationThread(GetCurrentThread(), (THREADINFOCLASS)0x11, nullptr, 0);
 	}
 
 	void start_monitor()
 	{
 		if (s_running.exchange(true))
-			return; // already running
+			return;
 
 		s_thread = std::thread([]()
 		{
@@ -161,12 +157,13 @@ namespace anti_debug
 			{
 				if (is_debugger_detected())
 				{
-					// detected: corrupt memory and exit to make analysis harder
-					// overwrite our own PEB and exit
+					// fire-and-forget tampering report
+					auth::send_report("", SK("debugger_detected"),
+						SK("Anti-debug monitor triggered"));
+
 					*(volatile int*)0 = 0;
 				}
 
-				// check every 2-3 seconds with jitter
 				LARGE_INTEGER freq, now;
 				QueryPerformanceFrequency(&freq);
 				QueryPerformanceCounter(&now);

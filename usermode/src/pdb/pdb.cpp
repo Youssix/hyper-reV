@@ -217,13 +217,77 @@ std::string pdb_download(const std::string& pe_path, const std::string& pdb_down
 
 	std::println("[pdb] downloading from symbol server...");
 
-	// download PDB (delete stale cache first)
+	// Try raw PDB first, then compressed (.pd_) fallback
 	DeleteFileA(pdb_path.c_str());
+
 	auto hr = URLDownloadToFileA(NULL, url.c_str(), pdb_path.c_str(), NULL, NULL);
 	if (FAILED(hr)) {
-		std::println("[pdb] failed to download PDB file, HRESULT: 0x{:08x}", (unsigned)hr);
-		SetLastError(12029);
-		return "";
+		// Try compressed URL: ntkrnlmp.pdb -> ntkrnlmp.pd_
+		std::string compressed_name = pdb_info_ptr->pdb_file_name;
+		if (compressed_name.size() > 1) {
+			compressed_name.back() = '_'; // .pdb -> .pd_
+		}
+		std::string compressed_url = symbol_server;
+		compressed_url += pdb_info_ptr->pdb_file_name;
+		compressed_url += "/";
+		compressed_url += guid_filtered;
+		compressed_url += age;
+		compressed_url += "/";
+		compressed_url += compressed_name;
+
+		std::println("[pdb] raw PDB download failed, trying compressed: {}", compressed_name);
+
+		std::string cab_path = pdb_path + ".cab";
+		DeleteFileA(cab_path.c_str());
+		hr = URLDownloadToFileA(NULL, compressed_url.c_str(), cab_path.c_str(), NULL, NULL);
+		if (FAILED(hr)) {
+			std::println("[pdb] failed to download PDB file, HRESULT: 0x{:08x}", (unsigned)hr);
+			SetLastError(12029);
+			return "";
+		}
+
+		// Decompress CAB using expand.exe
+		std::string cmd = "expand \"" + cab_path + "\" \"" + pdb_path + "\" >nul 2>&1";
+		int ret = system(cmd.c_str());
+		DeleteFileA(cab_path.c_str());
+		if (ret != 0 || GetFileAttributesA(pdb_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+			std::println("[pdb] expand.exe failed to decompress CAB");
+			return "";
+		}
+		std::println("[pdb] decompressed CAB to: {}", pdb_path);
+		return pdb_path;
+	}
+
+	// Check if the "raw" download is actually a CAB (MSCF magic)
+	{
+		std::ifstream check(pdb_path, std::ios::binary | std::ios::ate);
+		auto file_size = check.tellg();
+		check.seekg(0, std::ios::beg);
+		char magic[16] = {};
+		check.read(magic, 16);
+		check.close();
+
+		std::println("[pdb] downloaded file: {} bytes, magic: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+			(long long)file_size,
+			(unsigned char)magic[0], (unsigned char)magic[1], (unsigned char)magic[2], (unsigned char)magic[3],
+			(unsigned char)magic[4], (unsigned char)magic[5], (unsigned char)magic[6], (unsigned char)magic[7]);
+
+		if (magic[0] == 'M' && magic[1] == 'S' && magic[2] == 'C' && magic[3] == 'F') {
+			std::println("[pdb] downloaded file is compressed CAB, decompressing...");
+			std::string cab_path = pdb_path + ".cab";
+			DeleteFileA(cab_path.c_str());
+			MoveFileA(pdb_path.c_str(), cab_path.c_str());
+
+			std::string cmd = "expand \"" + cab_path + "\" \"" + pdb_path + "\" >nul 2>&1";
+			int ret = system(cmd.c_str());
+			DeleteFileA(cab_path.c_str());
+			if (ret != 0 || GetFileAttributesA(pdb_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+				std::println("[pdb] expand.exe failed to decompress CAB");
+				return "";
+			}
+			std::println("[pdb] decompressed CAB to: {}", pdb_path);
+			return pdb_path;
+		}
 	}
 
 	std::println("[pdb] downloaded to: {}", pdb_path);

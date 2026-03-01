@@ -8,6 +8,7 @@
 
 #include "../../arch/arch.h"
 #include "../../logs/logs.h"
+#include "../../logs/serial.h"
 #include "../../crt/crt.h"
 #include "../../structures/virtual_address.h"
 #include "../../cr3_intercept.h"
@@ -17,6 +18,12 @@ namespace slat::violation
 {
 	// Per-VPID pending GPA for fork sync (checked by Hook 2 after Hyper-V handler)
 	std::uint64_t fork_sync_pending_gpa[mtf::max_contexts] = { };
+
+	// One-shot serial log flags (fire once per type, then silent)
+	static volatile std::uint8_t logged_write = 0;
+	static volatile std::uint8_t logged_self_read = 0;
+	static volatile std::uint8_t logged_ext_read = 0;
+	static volatile std::uint8_t logged_exec = 0;
 }
 #endif
 
@@ -107,45 +114,79 @@ std::uint8_t slat::violation::process()
 	{
 		// New scheme: hook_cr3 has shadow PFN --X, so execute violations on hooked
 		// pages should not occur. Defensive fallback — flush and let retry.
+		if (!logged_exec) { logged_exec = 1; serial::print("[ept] EXEC violation (unexpected) GPA="); serial::print_hex(physical_address); serial::println(""); }
 		flush_current_logical_processor_cache();
 	}
 	else if (qualification.write_access)
 	{
 		// Write to hooked page on hook_cr3 (shadow --X, no W).
-		// Swap to hyperv_cr3 where original page has RWX (2MB identity, untouched).
-		set_cr3(hyperv_cr3());
-
+		// Use per-VP EPTP swap (NOT shared PTE modification) to avoid multi-VP race:
+		// PTE modification sets RW- (removes X) → other VPs executing on same page
+		// get infinite EPT execute violations until MTF restores --X → cascade freeze.
+		// EPTP swap: hyperv_cr3 has original page RWX (2MB identity), per-VP only.
+		// MTF handler syncs original→shadow after write completes, then swaps back.
 		const std::uint16_t vpid = arch::get_current_vpid();
 
 		if (vpid >= mtf::max_contexts)
 		{
-			// Cannot arm MTF — fall through on hyperv_cr3
+			set_cr3(hyperv_cr3());
 			return 0;
 		}
 
-		// Arm MTF: after 1 instruction (the write), sync shadow and swap back
+		if (!logged_write) { logged_write = 1; serial::print("[ept] WRITE violation GPA="); serial::print_hex(physical_address); serial::print(" origPFN="); serial::print_hex(hook_entry->original_pfn()); serial::println(""); }
+
+		set_cr3(hyperv_cr3());  // includes INVEPT
 		mtf::arm(vpid, physical_address, nullptr, 0, 1);
 		arch::enable_mtf();
-		flush_current_logical_processor_cache();
 	}
 	else
 	{
 		// Read on hooked page on hook_cr3 (shadow --X, no R).
-		// Swap to hyperv_cr3 where original page has RWX (shows clean original data).
-		set_cr3(hyperv_cr3());
+		const std::uint64_t guest_rip = arch::get_guest_rip();
+		const std::uint64_t guest_linear = arch::get_guest_linear_address();
+		const std::uint64_t rip_page = guest_rip & ~0xFFFull;
+		const std::uint64_t fault_page = guest_linear & ~0xFFFull;
 
 		const std::uint16_t vpid = arch::get_current_vpid();
 
 		if (vpid >= mtf::max_contexts)
 		{
-			// Cannot arm MTF — fall through on hyperv_cr3
+			set_cr3(hyperv_cr3());
 			return 0;
 		}
 
-		// Arm MTF: after 1 instruction (the read), swap back (no sync needed)
-		mtf::arm(vpid, physical_address, nullptr, 0, 0);
-		arch::enable_mtf();
-		flush_current_logical_processor_cache();
+		if (rip_page == fault_page)
+		{
+			// SELF-READ: code on shadow page reading its own data (RIP-relative constants, strings).
+			// Keep shadow PFN, add Read permission → R-X for 1 instruction.
+			// Safe for multi-VP: R-X keeps X (other VPs can still execute).
+			if (!logged_self_read) { logged_self_read = 1; serial::print("[ept] SELF-READ violation GPA="); serial::print_hex(physical_address); serial::print(" RIP="); serial::print_hex(guest_rip); serial::println(""); }
+
+			virtual_address_t gpa = { .address = physical_address };
+			slat_pte* const pte = get_pte(hook_cr3(), gpa);
+			if (pte)
+			{
+				const std::uint64_t saved = pte->flags;
+				pte->read_access = 1;  // R-X (was --X)
+				mtf::arm(vpid, physical_address, pte, saved, 0);
+				arch::enable_mtf();
+				flush_current_logical_processor_cache();  // needed: PTE change, no set_cr3
+			}
+		}
+		else
+		{
+			// EXTERNAL READ: different page reading our shadow.
+			// Use per-VP EPTP swap (NOT shared PTE modification) to avoid multi-VP race:
+			// PTE modification sets R-- (removes X) → other VPs executing on same page
+			// get infinite EPT execute violations until MTF restores --X → cascade freeze.
+			// EPTP swap: hyperv_cr3 has original page RWX (2MB identity), per-VP only.
+			// Stealth: reader sees original CC bytes (correct — shadow = our code, hidden).
+			if (!logged_ext_read) { logged_ext_read = 1; serial::print("[ept] EXT-READ violation GPA="); serial::print_hex(physical_address); serial::print(" RIP="); serial::print_hex(guest_rip); serial::println(""); }
+
+			set_cr3(hyperv_cr3());  // includes INVEPT
+			mtf::arm(vpid, physical_address, nullptr, 0, 0);
+			arch::enable_mtf();
+		}
 	}
 #else
 	const vmcb_t* const vmcb = arch::get_vmcb();

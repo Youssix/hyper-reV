@@ -1,7 +1,9 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <mutex>
 #include <atomic>
+#include <cstdint>
 
 namespace backend
 {
@@ -17,6 +19,9 @@ namespace backend
 	void cleanup();
 
 	void inject_async(const std::string& dll_path, const std::string& process_name);
+	void inject_from_memory(std::vector<uint8_t> dll_data, const std::string& process_name);
+	void download_and_inject(const std::string& token, const std::string& game_id,
+		const std::string& process_name);
 	void uninject_all();
 
 	inject_state get_state();

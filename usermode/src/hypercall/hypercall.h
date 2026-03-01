@@ -27,6 +27,7 @@ namespace hypercall
 	std::uint64_t disable_cr3_intercept();
 	std::uint64_t read_slat_violation_count();
 	std::uint64_t read_mmaf_hit_count();
+	std::uint64_t read_mmaf_total_count();
 	std::uint64_t arm_syscall_hijack(std::uint64_t shellcode_va, std::uint64_t rip_offset);
 	std::uint64_t disarm_syscall_hijack();
 	std::uint64_t read_hijack_cpuid_count();
@@ -40,6 +41,11 @@ namespace hypercall
 
 	std::uint64_t shadow_guest_page(std::uint64_t target_va);
 	std::uint64_t unshadow_guest_page(std::uint64_t target_va);
+
+	// External stealth R/W via clone CR3 — no injection needed.
+	// Anticheat reads the original CR3 (clean bytes), target runs on clone (our modifications).
+	std::uint64_t WriteCloneVirtualMemory(void* source_buffer, std::uint64_t dest_va, std::uint64_t size);
+	std::uint64_t ReadCloneVirtualMemory(void* dest_buffer, std::uint64_t source_va, std::uint64_t size);
 
 	std::uint64_t add_slat_code_hook(std::uint64_t target_guest_physical_address, std::uint64_t shadow_page_guest_physical_address);
 	std::uint64_t remove_slat_code_hook(std::uint64_t target_guest_physical_address);
@@ -85,6 +91,31 @@ namespace hypercall
 	                               const std::uint8_t* pattern, const char* mask,
 	                               std::uint32_t pattern_len, bool resolve_call);
 
+	// Hook 3: VMWRITE EPTP redirect control + diagnostics
+	std::uint64_t activate_vmwrite_hook(bool enable);
+	std::uint64_t hook3_read_on_hook_count();
+	std::uint64_t hook3_read_on_hyperv_count();
+	std::uint64_t hook3_read_rebootstrap_count();
+	std::uint64_t hook3_read_shellcode_exec_count();
+	std::uint64_t hook3_read_slot1();
+	std::uint64_t hook3_read_slot2();
+	std::uint64_t hook3_cave_diag();
+	std::uint64_t hook3_read_cave_pa();
+
+	// Option B diagnostics (EPTP source table patch)
+	std::uint64_t hook3_optb_bail();
+	std::uint64_t hook3_optb_per_vp();
+	std::uint64_t hook3_optb_ept_data();
+	std::uint64_t hook3_optb_count();
+	// Deep GS diagnostics
+	std::uint64_t hook3_optb_gs_base();
+	std::uint64_t hook3_optb_manual_read();
+	std::uint64_t hook3_optb_gs_first_qword();
+	std::uint64_t hook3_optb_host_gs_base();
+
 	// Boot hook diagnostics: field 0=packed_flags, 1=ntoskrnl_base, 2=fn_PsGetProcessImageFileName
 	std::uint64_t read_boot_hook_diag(std::uint64_t field);
+
+	// EPT hook diagnostic: field=0 triggers serial dump + returns summary, field>0 per-hook data
+	std::uint64_t hookdiag(std::uint64_t field);
 }

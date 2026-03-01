@@ -1,4 +1,7 @@
 #include "loader_backend.h"
+#include "../crypto/crypto.h"
+#include "../auth/auth_client.h"
+#include "../security/integrity.h"
 
 #include <thread>
 #include <mutex>
@@ -74,6 +77,25 @@ namespace backend
 		});
 	}
 
+	// shared init + inject logic
+	static bool ensure_initialized()
+	{
+		if (s_initialized)
+			return true;
+
+		set_status("Initializing hypervisor bridge...");
+
+		if (sys::set_up() == 0)
+		{
+			set_status("Failed: hyperv-attachment not loaded");
+			s_state = inject_state::failed;
+			return false;
+		}
+
+		s_initialized = true;
+		return true;
+	}
+
 	void cleanup()
 	{
 		stop_watchdog();
@@ -103,24 +125,108 @@ namespace backend
 
 		s_worker = std::thread([dll_path, process_name]()
 		{
-			// initialize hypervisor bridge on first injection
-			if (!s_initialized)
-			{
-				set_status("Initializing hypervisor bridge...");
-
-				if (sys::set_up() == 0)
-				{
-					set_status("Failed: hyperv-attachment not loaded");
-					s_state = inject_state::failed;
-					return;
-				}
-
-				s_initialized = true;
-			}
+			if (!ensure_initialized())
+				return;
 
 			set_status("Injecting into " + process_name + "...");
 
 			bool result = inject::inject_dll(dll_path, process_name);
+
+			if (result)
+			{
+				set_status("Injection successful");
+				s_state = inject_state::success;
+				start_watchdog();
+			}
+			else
+			{
+				set_status("Injection failed");
+				s_state = inject_state::failed;
+			}
+		});
+	}
+
+	void inject_from_memory(std::vector<uint8_t> dll_data, const std::string& process_name)
+	{
+		if (s_state == inject_state::running || s_state == inject_state::initializing)
+			return;
+
+		stop_watchdog();
+
+		if (s_worker.joinable())
+			s_worker.join();
+
+		s_state = inject_state::running;
+		set_status("Starting...");
+
+		s_worker = std::thread([data = std::move(dll_data), process_name]() mutable
+		{
+			if (!ensure_initialized())
+			{
+				crypto::secure_zero(data);
+				return;
+			}
+
+			set_status("Injecting into " + process_name + "...");
+
+			bool result = inject::inject_dll("", process_name, &data);
+
+			// zero DLL buffer regardless of outcome
+			crypto::secure_zero(data);
+
+			if (result)
+			{
+				set_status("Injection successful");
+				s_state = inject_state::success;
+				start_watchdog();
+			}
+			else
+			{
+				set_status("Injection failed");
+				s_state = inject_state::failed;
+			}
+		});
+	}
+
+	void download_and_inject(const std::string& token, const std::string& game_id,
+		const std::string& process_name)
+	{
+		if (s_state == inject_state::running || s_state == inject_state::initializing)
+			return;
+
+		stop_watchdog();
+
+		if (s_worker.joinable())
+			s_worker.join();
+
+		// pre-inject integrity gate
+		integrity::inline_check();
+
+		s_state = inject_state::running;
+		set_status("Downloading...");
+
+		s_worker = std::thread([token, game_id, process_name]()
+		{
+			auto dl = auth::download_dll(token, game_id);
+			if (!dl.success)
+			{
+				set_status("Download failed: " + dl.error);
+				s_state = inject_state::failed;
+				return;
+			}
+
+			if (!ensure_initialized())
+			{
+				crypto::secure_zero(dl.dll_data);
+				return;
+			}
+
+			set_status("Injecting into " + process_name + "...");
+
+			bool result = inject::inject_dll("", process_name, &dl.dll_data);
+
+			// zero DLL buffer regardless of outcome
+			crypto::secure_zero(dl.dll_data);
 
 			if (result)
 			{

@@ -27,6 +27,10 @@ namespace renderer
 	// draw accent border around the window (call at end of each page's render)
 	void draw_window_border();
 
+	// widgets call this to set how much of the right side is non-draggable
+	void set_caption_exclude_width(float w);
+
 	constexpr int WINDOW_WIDTH = 920;
 	constexpr int WINDOW_HEIGHT = 580;
+	constexpr float TITLE_BAR_HEIGHT = 44.0f;
 }

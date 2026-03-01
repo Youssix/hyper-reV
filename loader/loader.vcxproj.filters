@@ -46,6 +46,18 @@
     <Filter Include="Header Files\backend">
       <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566665555}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\security">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-44445555CCCC}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\crypto">
+      <UniqueIdentifier>{A1B2C3D4-1111-2222-3333-44445555DDDD}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\security">
+      <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566666666}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\crypto">
+      <UniqueIdentifier>{A1B2C3D4-2222-3333-4444-555566667777}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <!-- Loader source files -->
   <ItemGroup>
@@ -59,6 +71,9 @@
       <Filter>Source Files\renderer</Filter>
     </ClCompile>
     <ClCompile Include="src\renderer\theme.cpp">
+      <Filter>Source Files\renderer</Filter>
+    </ClCompile>
+    <ClCompile Include="src\renderer\widgets.cpp">
       <Filter>Source Files\renderer</Filter>
     </ClCompile>
     <ClCompile Include="src\pages\system_check.cpp">
@@ -78,6 +93,21 @@
     </ClCompile>
     <ClCompile Include="src\backend\loader_backend.cpp">
       <Filter>Source Files\backend</Filter>
+    </ClCompile>
+    <ClCompile Include="src\security\anti_debug.cpp">
+      <Filter>Source Files\security</Filter>
+    </ClCompile>
+    <ClCompile Include="src\security\integrity.cpp">
+      <Filter>Source Files\security</Filter>
+    </ClCompile>
+    <ClCompile Include="src\security\credential_store.cpp">
+      <Filter>Source Files\security</Filter>
+    </ClCompile>
+    <ClCompile Include="src\security\fingerprint.cpp">
+      <Filter>Source Files\security</Filter>
+    </ClCompile>
+    <ClCompile Include="src\crypto\crypto.cpp">
+      <Filter>Source Files\crypto</Filter>
     </ClCompile>
     <!-- Usermode shared sources -->
     <ClCompile Include="..\usermode\src\hypercall\hypercall.cpp">
@@ -143,6 +173,12 @@
     <ClInclude Include="src\renderer\theme.h">
       <Filter>Header Files\renderer</Filter>
     </ClInclude>
+    <ClInclude Include="src\renderer\widgets.h">
+      <Filter>Header Files\renderer</Filter>
+    </ClInclude>
+    <ClInclude Include="src\vendor\IconsFontAwesome6.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\pages\page.h">
       <Filter>Header Files\pages</Filter>
     </ClInclude>
@@ -166,6 +202,21 @@
     </ClInclude>
     <ClInclude Include="src\backend\loader_backend.h">
       <Filter>Header Files\backend</Filter>
+    </ClInclude>
+    <ClInclude Include="src\security\anti_debug.h">
+      <Filter>Header Files\security</Filter>
+    </ClInclude>
+    <ClInclude Include="src\security\integrity.h">
+      <Filter>Header Files\security</Filter>
+    </ClInclude>
+    <ClInclude Include="src\security\credential_store.h">
+      <Filter>Header Files\security</Filter>
+    </ClInclude>
+    <ClInclude Include="src\security\fingerprint.h">
+      <Filter>Header Files\security</Filter>
+    </ClInclude>
+    <ClInclude Include="src\crypto\crypto.h">
+      <Filter>Header Files\crypto</Filter>
     </ClInclude>
   </ItemGroup>
   <!-- Resources -->

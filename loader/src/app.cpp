@@ -22,8 +22,8 @@ namespace app
 		// security: hide main thread from debugger
 		anti_debug::hide_thread();
 
-		// security: capture binary integrity baseline
-		integrity::capture_baseline();
+		// security: capture binary integrity baselines (.text + .rdata + IAT)
+		integrity::capture_all_baselines();
 
 		// security: start background monitors
 		anti_debug::start_monitor();
@@ -54,6 +54,24 @@ namespace app
 
 	void render()
 	{
+		// watchdog: crash if integrity monitor thread was killed/stalled
+		if (!integrity::is_monitor_alive())
+		{
+			auth::send_report("", "monitor_killed", "Integrity monitor thread terminated");
+			integrity::inline_check();
+			TerminateProcess(GetCurrentProcess(), 1);
+		}
+
+		// spot check: fast .text CRC every 60th frame
+		{
+			static int frame_counter = 0;
+			if (++frame_counter >= 60)
+			{
+				frame_counter = 0;
+				integrity::inline_check();
+			}
+		}
+
 		// handle deferred logout (must happen before render, not during)
 		if (s_logout_pending)
 		{
@@ -70,6 +88,14 @@ namespace app
 		// check if session was revoked by server
 		if (s_state.authenticated && !auth::is_session_alive())
 		{
+			// kill game process if heartbeat died
+			if (s_state.target_process_handle)
+			{
+				TerminateProcess(s_state.target_process_handle, 1);
+				CloseHandle(s_state.target_process_handle);
+				s_state.target_process_handle = nullptr;
+			}
+
 			s_state.authenticated = false;
 			s_state.session = {};
 			navigate_to(page_id::login);

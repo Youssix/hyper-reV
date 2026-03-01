@@ -100,6 +100,7 @@ std::uint64_t slat::monitor::add(const virtual_address_t guest_physical_address)
 
 	monitor_mutex.release();
 
+	mark_all_lps_dirty();
 	flush_all_logical_processors_cache();
 
 	return 1;
@@ -151,6 +152,7 @@ std::uint64_t slat::monitor::remove(const virtual_address_t guest_physical_addre
 
 	monitor_mutex.release();
 
+	mark_all_lps_dirty();
 	flush_all_logical_processors_cache();
 
 	return 1;

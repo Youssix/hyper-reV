@@ -10,12 +10,15 @@
 
 #include "crt/crt.h"
 #include "interrupts/interrupts.h"
+#include "logs/serial.h"
 #include "slat/slat.h"
 #include "slat/cr3/cr3.h"
 #include "slat/cr3/fork_registry.h"
 #include "slat/violation/violation.h"
 #include "slat/violation/mtf_context.h"
 #include "cr3_intercept.h"
+
+#include "slat/shadow_code/shadow_code.h"
 
 #include <intrin.h>
 
@@ -26,6 +29,12 @@ extern "C"
     void vmexit_entry_hook_stub();
     std::uint64_t original_vmexit_entry_trampoline = 0;
 }
+
+// Hook 3 diagnostic counters — tracks EPTP state at Hook 2 entry
+volatile long long hook3_on_hook_cr3_count = 0;     // VP arrived on hook_cr3 (Hook 3 working)
+volatile long long hook3_on_hyperv_cr3_count = 0;   // VP arrived on hyperv_cr3 (bounce — Hook 3 failed/inactive)
+volatile long long hook3_rebootstrap_count = 0;     // Hook 2 had to re-set EPTP to hook_cr3
+
 
 namespace
 {
@@ -45,6 +54,18 @@ void clean_up_uefi_boot_image()
 // Flag for fast handler: don't process exits until Hook 2 init is done
 extern "C" volatile std::uint8_t hook2_initialized = 0;
 
+// Deferred shadow_code init: set when boot-time init fails (bad CR3 at first VMEXIT).
+// Hook 2 retries on subsequent VMEXITs until a valid kernel CR3 is found.
+// Split into 2 phases across separate VMEXITs to limit stack depth
+// (full init in one VMEXIT can overflow Hyper-V's host stack → triple fault).
+static volatile std::uint8_t shadow_code_deferred = 0;
+
+// Phase 2: MmClean hook setup (runs on the NEXT VMEXIT after shadow_code init succeeds).
+static volatile std::uint8_t mmclean_deferred = 0;
+// CR3 captured during phase 1, reused for phase 2.
+static volatile std::uint64_t deferred_init_cr3 = 0;
+
+
 void process_first_vmexit()
 {
     // Atomic guard: only one core runs init, others skip entirely.
@@ -52,17 +73,41 @@ void process_first_vmexit()
 
     if (_InterlockedCompareExchange(&is_first_vmexit, 0, 1) == 1)
     {
+        serial::init();
+        serial::println("[boot] process_first_vmexit: START");
+
+        // Log enlightened VMCS offsets from HvSetEptPointer sig scan (boot-time, one-shot)
+        serial::print("[boot] enlightened VMCS: gs_per_vp=0x");
+        serial::print_hex(arch::get_enlightened_gs_per_vp_offset());
+        serial::print(" eptp_cache=0x");
+        serial::print_hex(arch::get_enlightened_eptp_cache_offset());
+        serial::print(" clean_fields=0x");
+        serial::print_hex(arch::get_enlightened_clean_fields_offset());
+        serial::println("");
+
         slat::process_first_vmexit();
+        serial::println("[boot] slat::process_first_vmexit done");
+
         interrupts::set_up();
+        serial::println("[boot] interrupts::set_up done");
 
         clean_up_uefi_boot_image();
+        serial::println("[boot] clean_up_uefi_boot_image done");
 
-        // Boot-time hidden region — allocate page tables now (doesn't need ntoskrnl).
-        // PML4 entry auto-inserted into clone by sync_page_tables later.
-        // [BISECT] hypercall::setup_hidden_region_boot();
+        // Deferred shadow_code + MmClean init: scan ntoskrnl .text on next VTL0 VMEXIT
+        // (current VMEXIT may have KPTI user CR3 or VTL1 context → bad for IDT-based ntos lookup)
+        // CRITICAL: suppress NMI broadcasts during boot-time EPT setup.
+        // hook::add() calls flush_all_logical_processors_cache() which sends NMI IPI.
+        // NMI during guest execution → VMEXIT(NMI) → Hook 1 falls through → Hyper-V
+        // re-injects NMI to guest → Windows NMI handler at early boot → BSOD/freeze.
+        // Lazy INVEPT (dirty flags) handles TLB flush when VPs switch to hook_cr3 later.
+        slat::suppress_nmi_broadcast = 1;
+        shadow_code_deferred = 1;
+        serial::println("[boot] shadow_code deferred, NMI suppressed");
 
         // Signal fast handler that all subsystems are ready
         hook2_initialized = 1;
+        serial::println("[boot] hook2_initialized=1, boot COMPLETE");
     }
 }
 
@@ -71,6 +116,91 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 #ifdef _INTELMACHINE
     // Hook 2 runs for ALL VMEXITs (VTL 0 + VTL 1). Init must run regardless of VTL.
     process_first_vmexit();
+
+    // ======================================================================
+    // PHASE 1: Deferred shadow_code init (scan ntoskrnl .text, EPT-split).
+    // Split from MmClean setup to reduce peak stack depth — both together
+    // can overflow Hyper-V's host stack → triple fault → instant reboot.
+    // ======================================================================
+    if (shadow_code_deferred && !cr3_intercept::enabled)
+    {
+        // VTL1 VMEXITs have different IDTR/CR3 — reading IDT here would find
+        // securekernel handlers, not ntoskrnl. Only attempt on VTL0 VMEXITs.
+        const cr3 deferred_eptp = arch::get_slat_cr3();
+        if (!slat::is_our_eptp(deferred_eptp))
+        {
+            // VTL1 or unknown EPTP — skip this VMEXIT
+        }
+        else
+        {
+        static volatile long trying_init = 0;
+        static volatile long retry_count = 0;
+
+        if (_InterlockedCompareExchange(&trying_init, 1, 0) == 0)
+        {
+            const long attempt = _InterlockedIncrement(&retry_count);
+
+            if (attempt > 500)
+            {
+                shadow_code_deferred = 0;
+                slat::suppress_nmi_broadcast = 0;
+                serial::println("[boot] shadow_code GAVE UP (500 attempts)");
+                trying_init = 0;
+            }
+            else
+            {
+                const std::uint64_t guest_cr3 = arch::get_guest_cr3().flags;
+
+                // Silent retries — no serial logging per attempt (causes triple fault)
+                const std::uint64_t saved = cr3_intercept::target_original_cr3;
+                cr3_intercept::target_original_cr3 = guest_cr3;
+                hypercall::setup_shadow_code_pages();
+
+                if (shadow_code::initialized)
+                {
+                    shadow_code_deferred = 0;
+                    // [STEP 2b] Investigating cave_exec=0 — Hook 3 shellcode never fires.
+                    // shadow_code + hook_cr3 stable. No mmclean until cave is fixed.
+                    /* mmclean_deferred = 1; */
+                    /* deferred_init_cr3 = guest_cr3; */
+                    slat::suppress_nmi_broadcast = 0;
+                    serial::print("[boot] shadow_code OK (attempt ");
+                    serial::print_dec(attempt); serial::println("), NMI re-enabled. NO mmclean.");
+                }
+
+                cr3_intercept::target_original_cr3 = saved;
+                trying_init = 0;
+            }
+        }
+        } // end VTL0 check
+    }
+
+    // ======================================================================
+    // PHASE 2: MmClean hook setup (separate VMEXIT from phase 1).
+    // ======================================================================
+    if (mmclean_deferred && !cr3_intercept::enabled && slat::is_our_eptp(arch::get_slat_cr3()))
+    {
+        static volatile long trying_mmclean = 0;
+
+        if (_InterlockedCompareExchange(&trying_mmclean, 1, 0) == 0)
+        {
+            const std::uint64_t saved = cr3_intercept::target_original_cr3;
+            cr3_intercept::target_original_cr3 = deferred_init_cr3;
+
+            const std::uint64_t mm_result = hypercall::auto_setup_mmclean_hook();
+
+            mmclean_deferred = 0;
+
+            // Both phases complete — re-enable NMI broadcasts for runtime EPT ops.
+            slat::suppress_nmi_broadcast = 0;
+            // Log only result (runs once)
+            serial::print("[boot] mmclean ");
+            serial::println(mm_result ? "OK" : "FAILED");
+
+            cr3_intercept::target_original_cr3 = saved;
+            trying_mmclean = 0;
+        }
+    }
 
     // Deferred MmClean cleanup: pick up flag set by CPUID(22) on previous VMEXIT.
     // Hook 1 also checks this, but only for its 5 filtered exit types.
@@ -106,13 +236,39 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 
     if (on_hook_cr3)
     {
-        // [BISECT STEP 15] Pure passthrough — identical to step 7 which WORKED.
-        // NO swap before, NO restore after, NO guard. Just call and return.
-        // If HV's handler overwrites EPTP to hyperv_cr3, VP falls off hook_cr3.
-        // Re-bootstrap in bottom path (hook_cr3_ready) brings it back next VMEXIT.
+        hook3_on_hook_cr3_count++;
+
         const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
 
-        // Per-VMEXIT CR3 swap (ring-1 style): catch context switches after HV handler.
+        // [REMOVED] Option B: patch_eptp_source_table POST-handler.
+        // No longer needed: HvSetEptPointer entry hook handles PFN swap.
+        // HV calls HvSetEptPointer during handler → shellcode swaps → hook_cr3 in cache.
+
+        // [REVERTED] Option D: Post-handler EPTP fixup — causes HYPERVISOR_ERROR 0x26
+        // (VMWRITE + enlightened VMCS cache write during VP idle → inconsistency).
+        // Replaced by Option B: EPTP source table patched with hook_cr3 so Hyper-V
+        // reconstructs hook_cr3 naturally via HvGetEptPointer.
+        /*
+        {
+            const cr3 post_eptp = arch::get_slat_cr3();
+            if (post_eptp.address_of_page_directory == slat::hyperv_cr3().address_of_page_directory)
+            {
+                cr3 fixed = post_eptp;
+                fixed.address_of_page_directory = hk_cr3.address_of_page_directory;
+                arch::set_slat_cr3(fixed);
+
+                const std::uint16_t vpid = arch::get_current_vpid();
+                if (vpid < slat::max_logical_processors && slat::hook_cr3_ept_dirty[vpid])
+                {
+                    slat::flush_current_logical_processor_cache();
+                    slat::hook_cr3_ept_dirty[vpid] = 0;
+                }
+                hook3_rebootstrap_count++;
+            }
+        }
+        */
+
+        // Per-VMEXIT CR3 swap: catch context switches after HV handler.
         if (cr3_intercept::enabled)
         {
             const cr3 guest_cr3 = arch::get_guest_cr3();
@@ -136,11 +292,13 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
         return result;
     }
 
+    if (slat::is_our_eptp(current_eptp))
+        hook3_on_hyperv_cr3_count++;
+
     const auto result = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
 
     // Fork sync: if Hook 1's violation handler queued a fork sync (unhandled EPT
-    // violation in forked region), do the sync now. Don't write hook_cr3 to VMCS here —
-    // Hook 1 re-bootstraps on next VMEXIT (writing EPTP after HV handler = crash).
+    // violation in forked region), do the sync now.
     {
         const std::uint16_t vpid = arch::get_current_vpid();
 
@@ -149,29 +307,66 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
             slat::fork_registry::sync_forked_entry(slat::violation::fork_sync_pending_gpa[vpid]);
             slat::violation::fork_sync_pending_gpa[vpid] = 0;
         }
-
-        // [REMOVED] re-bootstrap from Hook 2 — writing hook_cr3 to VMCS AFTER HV's handler
-        // causes CLOCK_WATCHDOG / KERNEL_MODE_TRAP (bisect steps 9-14).
-        // Re-bootstrap is now in Hook 1 (vmexit_entry.cpp), BEFORE HV's handler.
     }
 
-    // Per-VMEXIT CR3 swap — same as on_hook_cr3 path above.
-    if (cr3_intercept::enabled && slat::is_our_eptp(current_eptp))
+    // [REMOVED] Option B: patch_eptp_source_table (non-on_hook_cr3 path).
+    // No longer needed: HvSetEptPointer entry hook handles PFN swap for all paths.
+
+    // [REVERTED] Option D: Post-handler EPTP fixup — causes HYPERVISOR_ERROR 0x26.
+    // Replaced by Option B: EPTP source table patched with hook_cr3.
+    /*
     {
-        const cr3 guest_cr3 = arch::get_guest_cr3();
-        const std::uint64_t guest_pfn = guest_cr3.flags & cr3_intercept::cr3_pfn_mask;
-        const std::uint64_t clone_pfn = cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask;
+        const cr3 post_eptp = arch::get_slat_cr3();
+        const bool is_vtl0 = slat::is_our_eptp(post_eptp);
+        const bool needs_fixup = is_vtl0 &&
+            (cr3_intercept::enabled || slat::is_vmwrite_hook_active()) &&
+            post_eptp.address_of_page_directory != hk_cr3.address_of_page_directory;
 
-        if (guest_pfn != clone_pfn)
+        if (needs_fixup)
         {
-            const std::uint64_t target_pfn = cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask;
+            const bool safe =
+                !cr3_intercept::enabled ||
+                (!cr3_intercept::mmaf_hook::ctx.active || cr3_intercept::mmaf_hook::ctx.stub_pfn_offset != 0);
 
-            if (guest_pfn == target_pfn ||
-                (cr3_intercept::target_user_cr3 != 0 &&
-                 guest_pfn == (cr3_intercept::target_user_cr3 & cr3_intercept::cr3_pfn_mask)))
+            if (safe)
             {
-                arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
-                cr3_intercept::cr3_swap_count++;
+                cr3 fixed = post_eptp;
+                fixed.address_of_page_directory = hk_cr3.address_of_page_directory;
+                arch::set_slat_cr3(fixed);
+
+                const std::uint16_t vpid = arch::get_current_vpid();
+                if (vpid < slat::max_logical_processors && slat::hook_cr3_ept_dirty[vpid])
+                {
+                    slat::flush_current_logical_processor_cache();
+                    slat::hook_cr3_ept_dirty[vpid] = 0;
+                }
+                hook3_rebootstrap_count++;
+            }
+        }
+    }
+    */
+
+    // CR3 swap: target process → clone CR3 (only with active cr3_intercept)
+    {
+        const cr3 post_eptp = arch::get_slat_cr3();
+        const bool is_vtl0 = slat::is_our_eptp(post_eptp);
+        if (cr3_intercept::enabled && is_vtl0)
+        {
+            const cr3 guest_cr3 = arch::get_guest_cr3();
+            const std::uint64_t guest_pfn = guest_cr3.flags & cr3_intercept::cr3_pfn_mask;
+            const std::uint64_t clone_pfn = cr3_intercept::cloned_cr3_value & cr3_intercept::cr3_pfn_mask;
+
+            if (guest_pfn != clone_pfn)
+            {
+                const std::uint64_t target_pfn = cr3_intercept::target_original_cr3 & cr3_intercept::cr3_pfn_mask;
+
+                if (guest_pfn == target_pfn ||
+                    (cr3_intercept::target_user_cr3 != 0 &&
+                     guest_pfn == (cr3_intercept::target_user_cr3 & cr3_intercept::cr3_pfn_mask)))
+                {
+                    arch::set_guest_cr3({ .flags = cr3_intercept::cloned_cr3_value });
+                    cr3_intercept::cr3_swap_count++;
+                }
             }
         }
     }
@@ -237,15 +432,19 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 
 void entry_point(std::uint8_t** const detours_out, std::uint8_t* const original_vmexit_handler_routine, const std::uint64_t heap_physical_base, const std::uint64_t heap_physical_usable_base, const std::uint64_t heap_total_size, const std::uint64_t _uefi_boot_physical_base_address, const std::uint32_t _uefi_boot_image_size,
 #ifdef _INTELMACHINE
-    const std::uint64_t _reserved_get_vmcb_gadget, const std::uint64_t vmexit_entry_trampoline)
+    const std::uint64_t _reserved_get_vmcb_gadget, const std::uint64_t vmexit_entry_trampoline, const std::uint64_t _vmwrite_hook_cave_pa, const std::uint64_t _enlightened_vmcs_offsets)
 {
     (void)_reserved_get_vmcb_gadget;
     original_vmexit_entry_trampoline = vmexit_entry_trampoline;
+    slat::set_vmwrite_hook_cave_pa(_vmwrite_hook_cave_pa);
+    arch::set_enlightened_vmcs_offsets(_enlightened_vmcs_offsets);
 
 #else
-const std::uint8_t* const get_vmcb_gadget, const std::uint64_t _reserved_vmexit_entry_trampoline)
+const std::uint8_t* const get_vmcb_gadget, const std::uint64_t _reserved_vmexit_entry_trampoline, const std::uint64_t _vmwrite_hook_cave_pa, const std::uint64_t _enlightened_vmcs_offsets)
 {
     (void)_reserved_vmexit_entry_trampoline;
+    (void)_vmwrite_hook_cave_pa;
+    (void)_enlightened_vmcs_offsets;
     arch::parse_vmcb_gadget(get_vmcb_gadget);
 #endif
     original_vmexit_handler = original_vmexit_handler_routine;

@@ -199,6 +199,11 @@ namespace cr3_intercept
 		void* shadow_heap_va = nullptr;                        // shadow page heap allocation
 		std::uint64_t trampoline_va = 0;                       // guest VA of trampoline (calls original)
 		std::uint64_t trampoline_hidden_slot = 0xFFFF;         // hidden PT slot for trampoline page
+		std::uint32_t stub_pfn_offset = 0;                     // byte offset in shadow page of clone PFN imm32 (0=no stub)
+		std::uint32_t displaced_count = 0;                     // number of displaced prologue bytes
+		// Adjacent page CC trampoline (when no CC padding on same page)
+		std::uint64_t cc_adj_target_pa = 0;                    // target PA page of adjacent shadow (0 = same page)
+		void* cc_adj_shadow_heap_va = nullptr;                 // adjacent shadow heap allocation (for free)
 	};
 
 	// Attachment image mapping into hidden region — makes compiled C++ code guest-executable
@@ -214,6 +219,8 @@ namespace cr3_intercept
 	namespace mmclean_hook
 	{
 		inline ept_hook_context_t ctx;
+		inline void* precheck_host_va = nullptr;   // host VA of pre-check shellcode (for patching immediates)
+		inline std::uint32_t imagefile_name_offset = 0x5A8; // EPROCESS.ImageFileName offset (resolved at boot)
 	}
 
 	// MmAccessFault compiled C++ EPT hook — safety net for hidden memory #PFs
@@ -223,6 +230,7 @@ namespace cr3_intercept
 		inline volatile std::uint64_t clone_cr3_value = 0;       // written by setup, read by guest hook
 		inline volatile std::uint8_t hidden_pml4_index = 0;      // PML4 index of hidden region
 		inline volatile std::uint64_t hit_count = 0;             // diagnostic: how many hidden memory faults caught
+		inline volatile std::uint64_t total_count = 0;           // diagnostic: total MmAccessFault calls through hook
 	}
 
 	// KiDispatchException EPT hook — safe memory probes
