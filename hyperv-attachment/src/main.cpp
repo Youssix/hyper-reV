@@ -69,6 +69,44 @@ std::uint64_t do_vmexit_premature_return()
 #endif
 }
 
+#ifndef _INTELMACHINE
+std::uint64_t forward_to_original_handler(vmcb_t* const vmcb, const std::uint64_t a1, const std::uint64_t a2, const std::uint64_t a3, const std::uint64_t a4)
+{
+    const cr3 saved_cr3 = vmcb->control.nested_cr3;
+    const std::uint64_t saved_exit_reason = vmcb->control.vmexit_reason;
+    const std::uint64_t saved_first_exit_info = vmcb->control.first_exit_info;
+    const std::uint64_t saved_second_exit_info = vmcb->control.second_exit_info;
+
+    if (saved_exit_reason == SVM_EXIT_REASON_NPF)
+    {
+        // already an NPF (SLAT violation) - clear execute bit so original handler sees a benign read fault
+        vmcb->control.first_exit_info = saved_first_exit_info & ~(1ULL << 4);
+    }
+    else
+    {
+        // non-NPF exit (CPUID hypercall, etc.) - fake a benign present-read NPF
+        vmcb->control.vmexit_reason = SVM_EXIT_REASON_NPF;
+        vmcb->control.first_exit_info = 1;
+        vmcb->control.second_exit_info = 0;
+    }
+
+    vmcb->control.nested_cr3 = slat::hyperv_cr3();
+    vmcb->control.tlb_control = tlb_control_t::flush_guest_tlb_entries;
+    vmcb->control.clean.nested_paging = 0;
+
+    const std::uint64_t ret = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+
+    vmcb->control.vmexit_reason = saved_exit_reason;
+    vmcb->control.first_exit_info = saved_first_exit_info;
+    vmcb->control.second_exit_info = saved_second_exit_info;
+    vmcb->control.nested_cr3 = saved_cr3;
+    vmcb->control.tlb_control = tlb_control_t::flush_guest_tlb_entries;
+    vmcb->control.clean.nested_paging = 0;
+
+    return ret;
+}
+#endif
+
 std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t a2, const std::uint64_t a3, const std::uint64_t a4)
 {
     process_first_vmexit();
@@ -104,12 +142,20 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
             arch::set_guest_rsp(trap_frame->rsp);
             arch::advance_guest_rip();
 
+#ifndef _INTELMACHINE
+            return forward_to_original_handler(vmcb, a1, a2, a3, a4);
+#else
             return do_vmexit_premature_return();
+#endif
         }
     }
     else if (arch::is_slat_violation(exit_reason) == 1 && slat::violation::process() == 1)
     {
+#ifndef _INTELMACHINE
+        return forward_to_original_handler(arch::get_vmcb(), a1, a2, a3, a4);
+#else
         return do_vmexit_premature_return();
+#endif
     }
     else if (arch::is_non_maskable_interrupt_exit(exit_reason) == 1)
     {
