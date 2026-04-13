@@ -143,25 +143,26 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
 
         if (status == EFI_SUCCESS)
         {
-            CHAR8* code_ref_to_vmexit_handler = NULL;
+            CHAR8* code_ref_to_sub_handler = NULL;
 
             UINT8 is_intel = 0;
 
-            // search for AMD's vmexit handler
-            status = scan_image(&code_ref_to_vmexit_handler, (CHAR8*)hyperv_text_base, hyperv_text_size, "\xE8\x00\x00\x00\x00\x48\x89\x04\x24\xE9", "x????xxxxx");
+            // search for AMD's per-exit dispatch call in the default case (sub_FFFFF800002228DC)
+            // hooking here instead of the vmexit entry means TimeCompensation runs naturally
+            status = scan_image(&code_ref_to_sub_handler, (CHAR8*)hyperv_text_base, hyperv_text_size, "\xE8\x00\x00\x00\x00\x45\x33\xE4\x83\x3B\x1F\x74", "x????xxxxxxx");
 
             if (status == EFI_NOT_FOUND)
             {
-                // search for Intel's vmexit handler
-                status = scan_image(&code_ref_to_vmexit_handler, (CHAR8*)hyperv_text_base, hyperv_text_size, "\xE8\x00\x00\x00\x00\xE9\x00\x00\x00\x00\x74", "x????x????x");
+                // fallback: search for Intel's vmexit handler (original approach)
+                status = scan_image(&code_ref_to_sub_handler, (CHAR8*)hyperv_text_base, hyperv_text_size, "\xE8\x00\x00\x00\x00\xE9\x00\x00\x00\x00\x74", "x????x????x");
 
                 is_intel = 1;
             }
 
             if (status == EFI_SUCCESS)
             {
-                INT32 original_vmexit_handler_rva = *(INT32*)(code_ref_to_vmexit_handler + 1);
-                CHAR8* original_vmexit_handler = (code_ref_to_vmexit_handler + 5) + original_vmexit_handler_rva;
+                INT32 original_sub_handler_rva = *(INT32*)(code_ref_to_sub_handler + 1);
+                CHAR8* original_sub_handler = (code_ref_to_sub_handler + 5) + original_sub_handler_rva;
 
                 UINT8* hyperv_attachment_vmexit_handler_detour = NULL;
 
@@ -181,7 +182,7 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
                 UINT64 heap_physical_usable_base = hyperv_attachment_heap_allocation_usable_base;
                 UINT64 heap_total_size = hyperv_attachment_heap_allocation_size;
 
-                hyperv_attachment_invoke_entry_point(&hyperv_attachment_vmexit_handler_detour, hyperv_attachment_entry_point, original_vmexit_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget);
+                hyperv_attachment_invoke_entry_point(&hyperv_attachment_vmexit_handler_detour, hyperv_attachment_entry_point, original_sub_handler, heap_physical_base, heap_physical_usable_base, heap_total_size, uefi_boot_physical_base_address, uefi_boot_image_size, get_vmcb_gadget);
 
                 CHAR8* code_cave = NULL;
 
@@ -195,9 +196,9 @@ void set_up_hyperv_hooks(cr3 hyperv_cr3, virtual_address_t entry_point)
                     {
                         hook_enable(&hv_vmexit_hook_data);
 
-                        UINT32 new_call_rva = (UINT32)(code_cave - (code_ref_to_vmexit_handler + 5));
+                        UINT32 new_call_rva = (UINT32)(code_cave - (code_ref_to_sub_handler + 5));
 
-                        mm_copy_memory(code_ref_to_vmexit_handler + 1, (UINT8*)&new_call_rva, sizeof(new_call_rva));
+                        mm_copy_memory(code_ref_to_sub_handler + 1, (UINT8*)&new_call_rva, sizeof(new_call_rva));
                     }
                 }
             }

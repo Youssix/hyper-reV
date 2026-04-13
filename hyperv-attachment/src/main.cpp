@@ -18,11 +18,13 @@
 #include <intrin.h>
 #endif
 
-typedef std::uint64_t(*vmexit_handler_t)(std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4);
+// original sub_FFFFF800002228DC — the per-exit dispatch called from the default case
+// handles all exit types (CPUID, NPF, NMI, etc.), TimeCompensation runs after it returns
+typedef void(*sub_handler_t)(std::uint64_t context);
 
 namespace
 {
-    std::uint8_t* original_vmexit_handler = nullptr;
+    std::uint8_t* original_sub_handler = nullptr;
     std::uint64_t uefi_boot_physical_base_address = 0;
     std::uint64_t uefi_boot_image_size = 0;
 }
@@ -60,54 +62,10 @@ void process_first_vmexit()
     }
 }
 
-std::uint64_t do_vmexit_premature_return()
-{
-#ifdef _INTELMACHINE
-    return 0;
-#else
-    return __readgsqword(0);
-#endif
-}
-
-#ifndef _INTELMACHINE
-std::uint64_t forward_to_original_handler(vmcb_t* const vmcb, const std::uint64_t a1, const std::uint64_t a2, const std::uint64_t a3, const std::uint64_t a4)
-{
-    const cr3 saved_cr3 = vmcb->control.nested_cr3;
-    const std::uint64_t saved_exit_reason = vmcb->control.vmexit_reason;
-    const std::uint64_t saved_first_exit_info = vmcb->control.first_exit_info;
-    const std::uint64_t saved_second_exit_info = vmcb->control.second_exit_info;
-
-    if (saved_exit_reason == SVM_EXIT_REASON_NPF)
-    {
-        // already an NPF (SLAT violation) - clear execute bit so original handler sees a benign read fault
-        vmcb->control.first_exit_info = saved_first_exit_info & ~(1ULL << 4);
-    }
-    else
-    {
-        // non-NPF exit (CPUID hypercall, etc.) - fake a benign present-read NPF
-        vmcb->control.vmexit_reason = SVM_EXIT_REASON_NPF;
-        vmcb->control.first_exit_info = 1;
-        vmcb->control.second_exit_info = 0;
-    }
-
-    vmcb->control.nested_cr3 = slat::hyperv_cr3();
-    vmcb->control.tlb_control = tlb_control_t::flush_guest_tlb_entries;
-    vmcb->control.clean.nested_paging = 0;
-
-    const std::uint64_t ret = reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
-
-    vmcb->control.vmexit_reason = saved_exit_reason;
-    vmcb->control.first_exit_info = saved_first_exit_info;
-    vmcb->control.second_exit_info = saved_second_exit_info;
-    vmcb->control.nested_cr3 = saved_cr3;
-    vmcb->control.tlb_control = tlb_control_t::flush_guest_tlb_entries;
-    vmcb->control.clean.nested_paging = 0;
-
-    return ret;
-}
-#endif
-
-std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t a2, const std::uint64_t a3, const std::uint64_t a4)
+// deep hook: replaces the call to sub_FFFFF800002228DC in the default case
+// called from INSIDE Hyper-V's vmexit handler — pre-processing (STGI) already ran,
+// TimeCompensation runs naturally AFTER we return. no premature returns needed.
+void sub_handler_detour(const std::uint64_t context)
 {
     process_first_vmexit();
 
@@ -115,11 +73,7 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
 
     if (arch::is_cpuid(exit_reason) == 1)
     {
-#ifdef _INTELMACHINE
-        trap_frame_t* const trap_frame = *reinterpret_cast<trap_frame_t**>(a1);
-#else
-        trap_frame_t* const trap_frame = *reinterpret_cast<trap_frame_t**>(a2);
-#endif
+        trap_frame_t* const trap_frame = *reinterpret_cast<trap_frame_t**>(context);
 
         const hypercall_info_t hypercall_info = { .value = trap_frame->rcx };
 
@@ -142,30 +96,23 @@ std::uint64_t vmexit_handler_detour(const std::uint64_t a1, const std::uint64_t 
             arch::set_guest_rsp(trap_frame->rsp);
             arch::advance_guest_rip();
 
-#ifndef _INTELMACHINE
-            return forward_to_original_handler(vmcb, a1, a2, a3, a4);
-#else
-            return do_vmexit_premature_return();
-#endif
+            return; // TimeCompensation runs after we return
         }
     }
     else if (arch::is_slat_violation(exit_reason) == 1 && slat::violation::process() == 1)
     {
-#ifndef _INTELMACHINE
-        return forward_to_original_handler(arch::get_vmcb(), a1, a2, a3, a4);
-#else
-        return do_vmexit_premature_return();
-#endif
+        return; // TimeCompensation runs after we return
     }
     else if (arch::is_non_maskable_interrupt_exit(exit_reason) == 1)
     {
         interrupts::process_nmi();
     }
 
-    return reinterpret_cast<vmexit_handler_t>(original_vmexit_handler)(a1, a2, a3, a4);
+    // not our exit — let original sub handle it
+    reinterpret_cast<sub_handler_t>(original_sub_handler)(context);
 }
 
-void entry_point(std::uint8_t** const vmexit_handler_detour_out, std::uint8_t* const original_vmexit_handler_routine, const std::uint64_t heap_physical_base, const std::uint64_t heap_physical_usable_base, const std::uint64_t heap_total_size, const std::uint64_t _uefi_boot_physical_base_address, const std::uint32_t _uefi_boot_image_size,
+void entry_point(std::uint8_t** const vmexit_handler_detour_out, std::uint8_t* const original_sub_handler_routine, const std::uint64_t heap_physical_base, const std::uint64_t heap_physical_usable_base, const std::uint64_t heap_total_size, const std::uint64_t _uefi_boot_physical_base_address, const std::uint32_t _uefi_boot_image_size,
 #ifdef _INTELMACHINE
     const std::uint64_t reserved_one)
 {
@@ -176,14 +123,14 @@ const std::uint8_t* const get_vmcb_gadget)
 {
     arch::parse_vmcb_gadget(get_vmcb_gadget);
 #endif
-    original_vmexit_handler = original_vmexit_handler_routine;
+    original_sub_handler = original_sub_handler_routine;
     uefi_boot_physical_base_address = _uefi_boot_physical_base_address;
     uefi_boot_image_size = _uefi_boot_image_size;
 
     heap_manager::initial_physical_base = heap_physical_base;
     heap_manager::initial_size = heap_total_size;
 
-    *vmexit_handler_detour_out = reinterpret_cast<std::uint8_t*>(vmexit_handler_detour);
+    *vmexit_handler_detour_out = reinterpret_cast<std::uint8_t*>(sub_handler_detour);
 
     const std::uint64_t heap_physical_end = heap_physical_base + heap_total_size;
     const std::uint64_t heap_usable_size = heap_physical_end - heap_physical_usable_base;
